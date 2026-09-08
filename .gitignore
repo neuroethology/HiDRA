@@ -1,0 +1,33 @@
+# Model weights — hosted on Hugging Face, fetched with download_models.py
+models/*.pkl
+
+# Local metadata (metadata.csv.example is the tracked template)
+metadata.csv
+
+# Prediction outputs
+doom_predictions/
+results/
+analysis_outputs/
+*.bouts.csv
+*.frames.parquet
+jobs.csv
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+
+# Environments
+hidra-env/
+.venv/
+venv/
+env/
+
+# Editors / OS
+.DS_Store
+.idea/
+.vscode/
+*.swp
