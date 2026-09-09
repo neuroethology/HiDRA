@@ -20,7 +20,8 @@ but is much slower (see the note in `requirements.txt`).
 ### Model weights
 
 The weights are **not in this repo** — at ~660 MB (individual files up to 149 MB) they exceed
-GitHub's file-size limit, so they are hosted on the [Hugging Face Hub](https://huggingface.co/).
+GitHub's file-size limit. They are hosted on the Hugging Face Hub instead, at
+**[talmolab/HiDRA](https://huggingface.co/talmolab/HiDRA)** (public, no login needed).
 Download them once into `models/` (needs ~700 MB free):
 
 ```bash

@@ -1,7 +1,8 @@
 # Model weights
 
 This directory is **empty in git** — the weights (~660 MB, files up to 149 MB) exceed GitHub's
-100 MB per-file limit, so they are hosted on the Hugging Face Hub instead.
+100 MB per-file limit, so they are hosted on the Hugging Face Hub instead, at
+[talmolab/HiDRA](https://huggingface.co/talmolab/HiDRA) (public, no login needed).
 
 Fetch them from the repo root:
 

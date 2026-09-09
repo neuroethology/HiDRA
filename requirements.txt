@@ -16,6 +16,5 @@ numpy==2.4.3
 pandas==3.0.1
 pyarrow==23.0.1
 
-# Weight download from the Hugging Face Hub (python download_models.py). Lower bound rather
-# than a pin: any recent release provides the hf_hub_download API used here.
-huggingface_hub>=0.34
+# Weight download from the Hugging Face Hub (python download_models.py).
+huggingface_hub==1.30.0
