@@ -33,6 +33,7 @@ os.chdir(PROJECT_DIR)
 import jax
 import jax.numpy as jnp
 import pandas as pd
+import scratch
 import solution
 from pm_rule import pm_action_ok
 
@@ -292,7 +293,7 @@ if LABTAIL:
     if CACHED_PREMERGE_DIR:
         assert LABTAIL_TUNE_MERGE, "CACHED_PREMERGE_DIR requires LABTAIL_TUNE_MERGE=1 (merge applied live on cached feats)"
         assert not CACHED_X0_DIR, "CACHED_PREMERGE_DIR and CACHED_X0_DIR are mutually exclusive"
-    LABTAIL_OUTDIR = os.environ.get("LABTAIL_OUTDIR")   # durable output dir (default /dev/shm)
+    LABTAIL_OUTDIR = os.environ.get("LABTAIL_OUTDIR")   # durable output dir (default: scratch.root())
 else:
     CACHED_X0_DIR = None
     CACHED_PREMERGE_DIR = None
@@ -899,14 +900,16 @@ def train_perlab(config, smoke=False):
     jax.set_mesh(jax.make_mesh((), ()))   # clear Trainer's 1-device mesh (jax 0.9.2: set_mesh(None) is rejected;
     trainer.sharding = None               # the empty mesh is the "no mesh" state that matches the inference path)
     # Checkpoints must live OFF the samba mount (no symlink support there -> the
-    # best.pkl symlink raises FileNotFoundError). Use /dev/shm; we copy the final
-    # weights into models/ (a plain file write, which samba does support).
+    # best.pkl symlink raises FileNotFoundError). scratch.root() is /dev/shm where it exists and
+    # the platform temp dir otherwise -- both support symlinks, which is the requirement; see
+    # scratch.py. We copy the final weights into models/ (a plain file write, which samba supports).
+    _scratch = scratch.root()
     _mtag = "_refit" if REFIT else ("_sniffall_scratch" if SNIFFALL_SCRATCH else ("_sniffall" if SNIFFALL else ""))
-    ckpt = (f"/dev/shm/doom_scale/{config['name']}__{SCALE_TAG}/checkpoints" if SCALE
-            else f"/dev/shm/doom_lolo/{config['name']}_LOLO-{LOLO_EXCLUDE}{FND_TAG}/checkpoints" if LOLO_EXCLUDE
-            else f"/dev/shm/doom_labtail/{config['name']}__{LABTAIL_TAG}/checkpoints" if LABTAIL
-            else f"/dev/shm/doom_disent/{config['name']}/checkpoints" if DISENTANGLE
-            else f"/dev/shm/doom_exp/{config['name']}_train_perlab{_mtag}/checkpoints")
+    ckpt = (f"{_scratch}/doom_scale/{config['name']}__{SCALE_TAG}/checkpoints" if SCALE
+            else f"{_scratch}/doom_lolo/{config['name']}_LOLO-{LOLO_EXCLUDE}{FND_TAG}/checkpoints" if LOLO_EXCLUDE
+            else f"{_scratch}/doom_labtail/{config['name']}__{LABTAIL_TAG}/checkpoints" if LABTAIL
+            else f"{_scratch}/doom_disent/{config['name']}/checkpoints" if DISENTANGLE
+            else f"{_scratch}/doom_exp/{config['name']}_train_perlab{_mtag}/checkpoints")
     os.makedirs(ckpt, exist_ok=True)
     trainer.checkpoint_dir = ckpt
     trainer.checkpoint_manager.checkpoint_dir = ckpt
@@ -935,13 +938,13 @@ def train_perlab(config, smoke=False):
         if SCALE:
             # Full model (canonical trunk + the one freshly-trained column) to /dev/shm so the
             # existing single-config inference can load it directly. Transient, unique per job.
-            _sdir = "/dev/shm/doom_scale/models"; os.makedirs(_sdir, exist_ok=True)
+            _sdir = scratch.path("doom_scale", "models"); os.makedirs(_sdir, exist_ok=True)
             out = f"{_sdir}/{config['name']}__{SCALE_TAG}.pkl"
         elif LOLO_EXCLUDE:
             os.makedirs(solution.persist_dir, exist_ok=True)
             out = f"{solution.persist_dir}/{config['name']}_supervised_perlab_sniffall_LOLO-{LOLO_EXCLUDE}{FND_TAG}.pkl"
         elif LABTAIL:
-            _ldir = LABTAIL_OUTDIR or "/dev/shm/doom_labtail/models"; os.makedirs(_ldir, exist_ok=True)
+            _ldir = LABTAIL_OUTDIR or scratch.path("doom_labtail", "models"); os.makedirs(_ldir, exist_ok=True)
             out = f"{_ldir}/{config['name']}__{LABTAIL_TAG}.pkl"
         elif DISENTANGLE:
             os.makedirs(solution.persist_dir, exist_ok=True)
