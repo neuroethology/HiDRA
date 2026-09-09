@@ -6,10 +6,17 @@ Apply the per-lab-head mouse-behaviour classifier ensemble to a folder of pose t
 QUICK START
   # 0. one-time: fetch the model weights (~660 MB) from the Hugging Face Hub into models/
   pip install huggingface_hub && python download_models.py
-  # 1. (recommended) generate a job sheet listing every available classifier, then edit it:
-  python predict.py /path/to/parquet_folder --dump-jobs jobs.csv
-  # 2. run it (default with no --jobs = ALL lab classifiers x ALL actions x ALL mouse pairs):
+  # 1. see which (lab, action) classifiers exist:
+  python predict.py --list-heads
+  # 2a. run a few of them (zero-shot -- no labels of your own needed):
+  python predict.py /path/to/parquet_folder --labs LyricalHare --actions attack,sniff \
+      --out results/ --pix-per-cm 16 --fps 30
+  # 2b. or select per-pair with a job sheet; with neither, EVERY head runs on every pair:
+  python predict.py /path/to/parquet_folder --dump-jobs jobs.csv   # edit, then:
   python predict.py /path/to/parquet_folder --jobs jobs.csv --out results/
+
+  See docs/zero-shot.md for choosing a lab, and docs/fine-tuning.md for adapting a head
+  to your own annotations (finetune.py) and running it here with --weights/--thresholds.
 
 INPUT
   A folder of tracking parquets (or .pkt), long format with columns:
@@ -48,6 +55,7 @@ import numpy as np, pandas as pd
 ALL_LABS = ["AdaptableSnail", "BoisterousParrot", "CautiousGiraffe", "DeliriousFly", "ElegantMink",
             "GroovyShrew", "InvincibleJellyfish", "JovialSwallow", "LyricalHare", "NiftyGoldfinch",
             "PleasantMeerkat", "ReflectiveManatee", "SparklingTapir", "TranquilPanther", "UppityFerret"]
+ALL_CONFIGS = ["11fps_4bp", "15fps_5bp", "19fps_6bp", "23fps_7bp", "27fps_6bp"]
 LAB_ID = "userdata"          # arbitrary tracking-folder tag; must NOT be 'MABe22_movies'
 DEFAULT_THR = 0.30
 THR_CSV = os.path.join(PKG, "derived_thresholds_train.csv")
@@ -70,15 +78,18 @@ def bodypart_schema():
     return allbp, canon7
 
 
-def load_get_threshold():
-    d = pd.read_csv(THR_CSV)
+def load_get_threshold(thr_csv=THR_CSV, const=None):
+    """(lab, action) -> threshold. `const` overrides every head with one value."""
+    if const is not None:
+        return lambda lab, action: float(const)
+    d = pd.read_csv(thr_csv)
     thr = {str(k): float(v) for k, v in zip(d[d.columns[0]], d[d.columns[1]])}
     return lambda lab, action: thr.get(f"{lab}__{action}", thr.get(f"pooled__{action}", DEFAULT_THR))
 
 
-def enum_heads():
+def enum_heads(thr_csv=THR_CSV):
     """(lab, action) for every classifier head, from the threshold file (includes sniffall)."""
-    d = pd.read_csv(THR_CSV)
+    d = pd.read_csv(thr_csv)
     heads = []
     for k in d[d.columns[0]]:
         if "__" not in str(k):
@@ -89,11 +100,52 @@ def enum_heads():
     return sorted(set(heads))
 
 
-def dump_jobs(path):
-    rows = [dict(run=1, lab=lab, action=act, subject="*", target="*") for lab, act in enum_heads()]
+def list_heads(thr_csv=THR_CSV):
+    """Print every available (lab, action) classifier head, grouped by lab."""
+    heads = enum_heads(thr_csv)
+    by_lab = {}
+    for lab, act in heads:
+        by_lab.setdefault(lab, []).append(act)
+    print(f"{len(heads)} classifier heads across {len(by_lab)} labs:\n")
+    for lab in sorted(by_lab):
+        print(f"  {lab:<21} {' '.join(sorted(by_lab[lab]))}")
+    print("\nUse --labs / --actions to select a subset, or --dump-jobs for a per-pair job sheet.")
+
+
+def dump_jobs(path, thr_csv=THR_CSV):
+    rows = [dict(run=1, lab=lab, action=act, subject="*", target="*") for lab, act in enum_heads(thr_csv)]
     pd.DataFrame(rows).to_csv(path, index=False)
     print(f"Wrote job-sheet template with {len(rows)} classifier heads -> {path}")
     print("Edit it: set run=0 to skip a row; set subject/target to a mouse id (mouse1..), 'self', or '*' (all pairs).")
+
+
+def jobs_from_filters(labs=None, actions=None, subject="*", target="*", thr_csv=THR_CSV):
+    """Build the same {(lab, action): [(subject, target)]} filter parse_jobs() returns, from
+    --labs/--actions/--subject/--target instead of a job sheet. Unknown names are an error."""
+    heads = enum_heads(thr_csv)
+    known_labs = sorted({l for l, _ in heads})
+    known_acts = sorted({a for _, a in heads})
+    if labs:
+        bad = [l for l in labs if l not in known_labs]
+        if bad:
+            sys.exit(f"ERROR: unknown lab(s) {bad}. Available: {known_labs}")
+    if actions:
+        bad = [a for a in actions if a not in known_acts]
+        if bad:
+            sys.exit(f"ERROR: unknown action(s) {bad}. Available: {known_acts}")
+    sel = [(l, a) for l, a in heads
+           if (not labs or l in labs) and (not actions or a in actions)]
+    if not sel:
+        # the usual cause is a lab/action pair that was never trained together (e.g. the 5
+        # sniff-splitting labs have 'sniffall' and no plain 'sniff') -- say who does have it.
+        detail = ""
+        for a in (actions or []):
+            who = sorted(l for l, act in heads if act == a)
+            detail += f"\n  '{a}' has heads for: {who}"
+        for l in (labs or []):
+            detail += f"\n  {l} has heads for: {sorted(act for lab_, act in heads if lab_ == l)}"
+        sys.exit(f"ERROR: no classifier head matches labs={labs} actions={actions}.{detail}")
+    return {k: [(subject, target)] for k in sel}
 
 
 def parse_jobs(path):
@@ -162,42 +214,50 @@ def runs(mask):
     return list(zip(st, en))
 
 
-def main():
-    ap = argparse.ArgumentParser(prog="HiDRA",
-                                 description="HiDRA (High-Dimensional Rodent Annotator): apply the per-lab-head behaviour classifier ensemble to pose parquets.",
-                                 formatter_class=argparse.RawDescriptionHelpFormatter, epilog=__doc__)
-    ap.add_argument("folder", nargs="?", help="folder of tracking parquets (.parquet/.pkt)")
-    ap.add_argument("--jobs", help="CSV job sheet selecting lab/action/subject/target (default: all)")
-    ap.add_argument("--dump-jobs", metavar="FILE", help="write an editable job-sheet template and exit")
-    ap.add_argument("--out", default="doom_predictions", help="output folder (default: doom_predictions)")
-    ap.add_argument("--pix-per-cm", type=float, help="pixels-per-cm for ALL files (overridden by metadata.csv rows)")
-    ap.add_argument("--fps", type=float, help="frames-per-second for ALL files")
-    ap.add_argument("--gpu", default="0", help="CUDA device index (default 0)")
-    ap.add_argument("--output", choices=["both", "calls", "probs"], default="both",
-                    help="what to write: both (default), calls-only (bouts.csv), or probs-only (frames.parquet)")
-    ap.add_argument("--keep-work", action="store_true", help="keep the scratch inference dir")
-    args = ap.parse_args()
+def run(folder, jobs=None, labs=None, actions=None, subject="*", target="*",
+        out="doom_predictions", pix_per_cm=None, fps=None, gpu="0", output="both",
+        keep_work=False, weights=None, thresholds=THR_CSV, threshold=None, configs=None):
+    """Run the ensemble over a folder of tracking parquets and write bouts/frames into `out`.
 
-    if args.dump_jobs:
-        dump_jobs(args.dump_jobs); return
-    if not args.folder:
-        ap.error("provide a parquet folder (or use --dump-jobs FILE)")
+    jobs      job-sheet path, or the dict parse_jobs() returns, or None for every head
+    labs      restrict to these classifier labs (alternative to a job sheet)
+    actions   restrict to these behaviours
+    subject   acting mouse for the filtered heads: 'mouse1'..'mouse4', 'self', or '*'
+    target    recipient mouse, same values
+    weights   per-lab checkpoint path template with a '{config}' placeholder, for
+              fine-tuned weights (default: models/{config}_supervised_perlab_sniffall.pkl)
+    thresholds  CSV of '<lab>__<action>,threshold' rows (default derived_thresholds_train.csv)
+    threshold   one constant threshold for every head, overriding `thresholds`
+    configs   run only these ensemble configs (default: all 5) -- faster, lower quality
+
+    Returns the list of written output stems.
+    """
+    if isinstance(jobs, str):
+        jobs = parse_jobs(jobs)
+    if jobs is None and (labs or actions or subject != "*" or target != "*"):
+        jobs = jobs_from_filters(labs, actions, subject, target, thresholds)
+    if weights and "{config}" not in weights:
+        sys.exit("ERROR: --weights must contain a '{config}' placeholder, e.g. "
+                 "ft_models/{config}__myrig.pkl")
+    if configs:
+        bad = [c for c in configs if c not in ALL_CONFIGS]
+        if bad:
+            sys.exit(f"ERROR: unknown config(s) {bad}; available: {ALL_CONFIGS}")
 
     from download_models import require_weights
     require_weights()          # weights are hosted on Hugging Face, not in git
 
-    parquets = discover(args.folder)
+    parquets = discover(folder)
     if not parquets:
-        sys.exit(f"no .parquet/.pkt files in {args.folder}")
-    meta = load_metadata(args.folder, parquets, args.pix_per_cm, args.fps)
-    jobs = parse_jobs(args.jobs)
-    labs = sorted({lab for (lab, _) in jobs}) if jobs else ALL_LABS
-    labs = [l for l in labs if l in ALL_LABS]
-    print(f"{len(parquets)} parquet(s); running {len(labs)} lab classifier set(s): {labs}")
+        sys.exit(f"no .parquet/.pkt files in {folder}")
+    meta = load_metadata(folder, parquets, pix_per_cm, fps)
+    run_labs = sorted({lab for (lab, _) in jobs}) if jobs else ALL_LABS
+    run_labs = [l for l in run_labs if l in ALL_LABS]
+    print(f"{len(parquets)} parquet(s); running {len(run_labs)} lab classifier set(s): {run_labs}")
 
     allbp, canon7 = bodypart_schema()
-    os.makedirs(args.out, exist_ok=True)
-    ds = os.path.abspath(os.path.join(args.out, "_work"))
+    os.makedirs(out, exist_ok=True)
+    ds = os.path.abspath(os.path.join(out, "_work"))
     tdir = os.path.join(ds, "custom_tracking", LAB_ID)
     outstore = os.path.join(ds, "perlab_allbeh")
     os.makedirs(tdir, exist_ok=True); os.makedirs(outstore, exist_ok=True)
@@ -221,18 +281,26 @@ def main():
 
     env = dict(os.environ, SNIFFALL="1", PREDICT_BATCH="64", XLA_FLAGS="--xla_gpu_autotune_level=0",
                XLA_PYTHON_CLIENT_PREALLOCATE="false",
-               CUDA_VISIBLE_DEVICES=str(args.gpu), CUSTOM_DIR=ds, CUSTOM_CSV="manifest.csv",
+               CUDA_VISIBLE_DEVICES=str(gpu), CUSTOM_DIR=ds, CUSTOM_CSV="manifest.csv",
                CUSTOM_MODE="custom", CUSTOM_OUT=outstore, PERLAB_WORKDIR=f"/dev/shm/doom_predict_{os.getpid()}")
+    if weights:
+        env["HIDRA_PERLAB_CKPT"] = os.path.abspath(weights)   # the subprocess runs with cwd=PKG
+        print(f"using fine-tuned per-lab weights: {weights}")
+    if configs:
+        env["HIDRA_CONFIGS"] = ",".join(configs)
+        print(f"WARNING: running {len(configs)}/5 ensemble configs ({configs}) -- faster but "
+              "lower quality than the full ensemble, and the bundled thresholds were calibrated "
+              "on all 5. For iterating only.")
     shutil.rmtree(env["PERLAB_WORKDIR"], ignore_errors=True)
-    for i, lab in enumerate(labs, 1):
-        print(f"[{i}/{len(labs)}] inferring {lab} ...", flush=True)
+    for i, lab in enumerate(run_labs, 1):
+        print(f"[{i}/{len(run_labs)}] inferring {lab} ...", flush=True)
         r = subprocess.run([sys.executable, os.path.join(PKG, "run_allbehaviors_perlab.py"),
                             "--dataset", "custom", "--embedding-lab", lab, "--epochs", "1"], env=env, cwd=PKG)
         if r.returncode != 0:
             print(f"  WARNING: {lab} inference exited {r.returncode}; skipping its outputs")
     shutil.rmtree(env["PERLAB_WORKDIR"], ignore_errors=True)
 
-    getthr = load_get_threshold(); anames = action_names()
+    getthr = load_get_threshold(thresholds, threshold); anames = action_names()
 
     def keep(lab, act, subj, tgt):
         if jobs is None:
@@ -241,8 +309,8 @@ def main():
         return filt is not None and any((fs in ("*", subj)) and (ft in ("*", tgt)) for fs, ft in filt)
 
     stores = {lab: pickle.load(open(os.path.join(outstore, f"{lab}.pkl"), "rb"))
-              for lab in labs if os.path.isfile(os.path.join(outstore, f"{lab}.pkl"))}
-    n_out = 0
+              for lab in run_labs if os.path.isfile(os.path.join(outstore, f"{lab}.pkl"))}
+    written = []
     for pq in parquets:
         vid = vid_of(pq); stem = os.path.splitext(os.path.basename(pq))[0]
         bouts, frames = [], []
@@ -258,20 +326,68 @@ def main():
                     bouts.append(dict(subject=subj, target=tgt, lab=lab, action=act,
                                       start_frame=int(s), stop_frame=int(e - 1),
                                       n_frames=int(e - s), mean_prob=round(float(pr[s:e].mean()), 4), threshold=round(thr, 4)))
-                if args.output in ("both", "probs"):
+                if output in ("both", "probs"):
                     idx = np.arange(len(pr))
                     frames.append(pd.DataFrame(dict(frame=idx, subject=subj, target=tgt, lab=lab, action=act,
                                                     prob=pr, call=call.astype(np.int8))))
-        if args.output in ("both", "calls"):
-            pd.DataFrame(bouts).to_csv(os.path.join(args.out, f"{stem}.bouts.csv"), index=False)
-        if args.output in ("both", "probs") and frames:
-            pd.concat(frames, ignore_index=True).to_parquet(os.path.join(args.out, f"{stem}.frames.parquet"))
-        n_out += 1
-        print(f"  {stem}: {len(bouts)} bouts -> {args.out}/{stem}.*")
+        if output in ("both", "calls"):
+            pd.DataFrame(bouts).to_csv(os.path.join(out, f"{stem}.bouts.csv"), index=False)
+        if output in ("both", "probs") and frames:
+            pd.concat(frames, ignore_index=True).to_parquet(os.path.join(out, f"{stem}.frames.parquet"))
+        written.append(stem)
+        print(f"  {stem}: {len(bouts)} bouts -> {out}/{stem}.*")
 
-    if not args.keep_work:
+    if not keep_work:
         shutil.rmtree(ds, ignore_errors=True)
-    print(f"done: {n_out} parquet(s) -> {args.out}/")
+    print(f"done: {len(written)} parquet(s) -> {out}/")
+    return written
+
+
+def main():
+    ap = argparse.ArgumentParser(prog="HiDRA",
+                                 description="HiDRA (High-Dimensional Rodent Annotator): apply the per-lab-head behaviour classifier ensemble to pose parquets.",
+                                 formatter_class=argparse.RawDescriptionHelpFormatter, epilog=__doc__)
+    ap.add_argument("folder", nargs="?", help="folder of tracking parquets (.parquet/.pkt)")
+    ap.add_argument("--jobs", help="CSV job sheet selecting lab/action/subject/target (default: all)")
+    ap.add_argument("--dump-jobs", metavar="FILE", help="write an editable job-sheet template and exit")
+    ap.add_argument("--list-heads", action="store_true", help="print every (lab, action) classifier head and exit")
+    ap.add_argument("--labs", help="comma-separated classifier labs to run (quick alternative to --jobs)")
+    ap.add_argument("--actions", help="comma-separated behaviours to run (quick alternative to --jobs)")
+    ap.add_argument("--subject", default="*", help="acting mouse for --labs/--actions: mouse1..mouse4, self, or * (default *)")
+    ap.add_argument("--target", default="*", help="recipient mouse for --labs/--actions: mouse1..mouse4, self, or * (default *)")
+    ap.add_argument("--out", default="doom_predictions", help="output folder (default: doom_predictions)")
+    ap.add_argument("--pix-per-cm", type=float, help="pixels-per-cm for ALL files (overridden by metadata.csv rows)")
+    ap.add_argument("--fps", type=float, help="frames-per-second for ALL files")
+    ap.add_argument("--gpu", default="0", help="CUDA device index (default 0)")
+    ap.add_argument("--output", choices=["both", "calls", "probs"], default="both",
+                    help="what to write: both (default), calls-only (bouts.csv), or probs-only (frames.parquet)")
+    ap.add_argument("--weights", metavar="TEMPLATE",
+                    help="fine-tuned per-lab checkpoints, e.g. 'finetuned/{config}__MyLab.pkl' "
+                         "('{config}' is filled with each of the 5 config names)")
+    ap.add_argument("--thresholds", default=THR_CSV, metavar="FILE",
+                    help="thresholds CSV ('<lab>__<action>,threshold' rows); default derived_thresholds_train.csv")
+    ap.add_argument("--threshold", type=float, help="one constant threshold for every head (overrides --thresholds)")
+    ap.add_argument("--configs", help=f"run only these ensemble configs (default all 5: "
+                                      f"{','.join(ALL_CONFIGS)}); faster, lower quality, for iterating")
+    ap.add_argument("--keep-work", action="store_true", help="keep the scratch inference dir")
+    args = ap.parse_args()
+
+    if args.list_heads:
+        list_heads(args.thresholds); return
+    if args.dump_jobs:
+        dump_jobs(args.dump_jobs, args.thresholds); return
+    if not args.folder:
+        ap.error("provide a parquet folder (or use --dump-jobs FILE / --list-heads)")
+    if args.jobs and (args.labs or args.actions):
+        ap.error("--jobs and --labs/--actions are alternatives; use one or the other")
+
+    run(args.folder, jobs=args.jobs,
+        labs=[x.strip() for x in args.labs.split(",") if x.strip()] if args.labs else None,
+        actions=[x.strip() for x in args.actions.split(",") if x.strip()] if args.actions else None,
+        subject=args.subject, target=args.target, out=args.out, pix_per_cm=args.pix_per_cm,
+        fps=args.fps, gpu=args.gpu, output=args.output, keep_work=args.keep_work,
+        weights=args.weights, thresholds=args.thresholds, threshold=args.threshold,
+        configs=[c.strip() for c in args.configs.split(",") if c.strip()] if args.configs else None)
 
 
 if __name__ == "__main__":

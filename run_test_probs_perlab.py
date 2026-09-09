@@ -31,6 +31,16 @@ from train_perlab_heads import MultiTaskPerLabModel
 OUT_DIR = os.path.join(PROJECT_DIR, "analysis_outputs", "test_predictions", "perlab")
 SNIFFALL = bool(os.environ.get("SNIFFALL"))          # load the namespaced 93-head sniffall model + its heads
 _PERLAB_SUFFIX = "_sniffall" if SNIFFALL else ""
+# HIDRA_PERLAB_CKPT: path template (with a '{config}' placeholder) for the per-lab supervised
+# weights, so fine-tuned checkpoints (finetune.py -> {config}__{tag}.pkl) can be used for
+# inference without copying them over models/. Unset -> the canonical models/ checkpoint.
+_PERLAB_CKPT = os.environ.get("HIDRA_PERLAB_CKPT")
+
+
+def perlab_ckpt_path(config_name):
+    if _PERLAB_CKPT:
+        return _PERLAB_CKPT.format(config=config_name)
+    return f"{solution.persist_dir}/{config_name}_supervised_perlab{_PERLAB_SUFFIX}.pkl"
 
 
 def predict_into(config, predictions, num_epochs, dtype):
@@ -48,7 +58,7 @@ def predict_into(config, predictions, num_epochs, dtype):
         n_bp=config["num_bodyparts"], padding=32, dtype=dtype,
         unsupervised_model=(um, upath))
     sm.set_context({"stage": "eval"})
-    weights = pickle.load(open(f"{solution.persist_dir}/{config['name']}_supervised_perlab{_PERLAB_SUFFIX}.pkl", "rb"))
+    weights = pickle.load(open(perlab_ckpt_path(config["name"]), "rb"))
     sm = sm.set_variables(weights)
 
     @jax.jit
