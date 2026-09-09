@@ -617,6 +617,12 @@ def load_train_videos_robust():
 
 
 def train_perlab(config, smoke=False):
+    # HIDRA_DATA_DIR: train from a dataset staged somewhere else (finetune.py writes
+    # {dir}/TRAIN.csv + {dir}/train_{tracking,annotation}/{lab}/{video_id}.parquet).
+    # Unset -> the in-repo data/ dir, i.e. the original competition layout.
+    if os.environ.get("HIDRA_DATA_DIR"):
+        solution.dataset_dir = os.path.abspath(os.environ["HIDRA_DATA_DIR"])
+        print(f"[DATA] dataset_dir -> {solution.dataset_dir}", flush=True)
     # SCALE sweep: honor a private tracking-cache dir so parallel jobs (one per GPU lane) don't
     # race the shared mode-keyed {working_dir}/train/*.bin cache. Assign whole labs to a lane so
     # a lane rebuilds each video's .bin once and reuses it across that lab's size jobs.

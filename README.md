@@ -2,7 +2,17 @@
 
 Apply the trained **per-lab-head behaviour-classifier ensemble** (5-config: 11fps_4bp, 15fps_5bp,
 19fps_6bp, 23fps_7bp, 27fps_6bp) to your own pose-tracking parquets. By default HiDRA runs **every
-lab's classifiers, for every behaviour, on every mouse pair**; you can narrow this with a job sheet.
+lab's classifiers, for every behaviour, on every mouse pair**; you can narrow this with `--labs` /
+`--actions` or a job sheet.
+
+Two ways to use it:
+
+- **[Zero-shot inference](docs/zero-shot.md)** — no labels of your own. Pick one of the 82 trained
+  (lab, behaviour) classifier heads and run it on your videos: `predict.py`.
+- **[Fine-tuning](docs/fine-tuning.md)** — you have some annotations. Adapt the head you picked to
+  your arena, pose rig and annotation style, then re-calibrate its threshold: `finetune.py`.
+
+There is also a small Python API in [`hidra.py`](hidra.py) for notebook use.
 
 ## Setup
 
@@ -80,14 +90,34 @@ scale silently makes *all* predictions zero, so the tool refuses to run without 
 # activate the environment created in Setup (or use any interpreter with requirements.txt installed)
 source hidra-env/bin/activate
 
-# Default: ALL classifiers x ALL actions x ALL mouse pairs on every parquet
+# What can I run? 82 (lab, behaviour) heads across 15 labs:
+python predict.py --list-heads
+
+# The quick path: one lab, a couple of behaviours
+python predict.py /path/to/folder --out results/ --pix-per-cm 16 --fps 30 \
+    --labs GroovyShrew --actions rear,sniffall
+
+# Default with no selection: ALL classifiers x ALL actions x ALL mouse pairs on every parquet
 python predict.py /path/to/folder --out results/ --pix-per-cm 16 --fps 30
 
-# Customise which classifiers run — generate an editable job sheet, edit, pass back:
+# Per-pair control — generate an editable job sheet, edit, pass back:
 python predict.py /path/to/folder --dump-jobs jobs.csv      # writes all 82 heads
 #   edit jobs.csv in a spreadsheet, then:
 python predict.py /path/to/folder --jobs jobs.csv --out results/
 ```
+
+From Python:
+
+```python
+import hidra
+hidra.heads(action="attack")                      # which labs have an attack classifier
+hidra.predict("tracking/", out="results/", labs=["LyricalHare"], actions=["attack"],
+              pix_per_cm=16, fps=30)
+bouts = hidra.bouts("results/")                   # ethogram DataFrame across all videos
+```
+
+Choosing between the labs' classifiers, and what to do when the calls look
+systematically off, are covered in **[docs/zero-shot.md](docs/zero-shot.md)**.
 
 ### The job sheet (`jobs.csv`)
 
@@ -120,15 +150,39 @@ to a pooled value then 0.30.
 ## Options
 
 ```
---jobs FILE        job sheet (default: all heads x all pairs)
+--list-heads       print every (lab, action) classifier head and exit
+--labs L1,L2       run only these labs' classifiers
+--actions A1,A2    run only these behaviours
+--subject M        acting mouse for --labs/--actions: mouse1..mouse4, self, * (default *)
+--target M         recipient mouse, same values
+--jobs FILE        job sheet, for per-head pair control (default: all heads x all pairs)
 --dump-jobs FILE   write a template job sheet and exit
 --out DIR          output folder (default: doom_predictions)
 --pix-per-cm N     pixels-per-cm for all files (metadata.csv rows override)
 --fps N            frame rate for all files
 --gpu N            CUDA device index (default 0)
 --output MODE      both | calls | probs
+--weights TEMPLATE fine-tuned per-lab checkpoints, e.g. 'ft_models/{config}__mytag.pkl'
+--thresholds FILE  thresholds CSV (default: derived_thresholds_train.csv)
+--threshold P      one constant threshold for every head
+--configs C1,C2    run only these ensemble configs (default all 5; faster, lower quality)
 --keep-work        keep the scratch inference directory
 ```
+
+## Fine-tuning on your own annotations
+
+```bash
+python finetune.py prepare  --tracking parquets/ --annotations bouts.csv --lab GroovyShrew --out ft_data/
+python finetune.py train    --data ft_data/ --lab GroovyShrew --actions rear --out ft_models/ --tag myrig
+python finetune.py calibrate --frames ft_preds/ --annotations heldout_bouts.csv --out ft_thresholds.csv
+```
+
+`prepare` stages your parquets plus a bout CSV into the layout the trainer reads, `train`
+warm-starts the adopted lab's head from the published checkpoint and adapts it to your data (5
+configs, one GPU), and `calibrate` re-fits the decision thresholds against your annotations —
+useful on its own, with no training, if the zero-shot calls are right but the threshold is not.
+You adopt an existing (lab, behaviour) head; new behaviour names and new labs are not possible.
+Full walkthrough and caveats: **[docs/fine-tuning.md](docs/fine-tuning.md)**.
 
 ## Notes / gotchas
 
@@ -142,7 +196,10 @@ to a pooled value then 0.30.
 ## Contents
 
 ```
-predict.py                       # the tool
+predict.py                       # inference (zero-shot or with fine-tuned weights)
+finetune.py                      # prepare / train / calibrate on your own annotations
+hidra.py                         # Python API over predict.py + the outputs
+docs/zero-shot.md docs/fine-tuning.md
 solution.py train_perlab_heads.py pm_rule.py
 run_test_probs_perlab.py run_allbehaviors_perlab.py   # inference engine
 derived_thresholds_train.csv     # per-(lab,action) thresholds (incl. sniffall)

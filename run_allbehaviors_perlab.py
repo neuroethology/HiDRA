@@ -249,6 +249,14 @@ def main():
 
     preds = solution.Predictions(vids)
     configs = solution.get_configs()
+    # HIDRA_CONFIGS: run a SUBSET of the 5-config ensemble (comma-separated config names).
+    # Cheaper and lower quality -- for iterating on a single fine-tuned config, not for results.
+    if os.environ.get("HIDRA_CONFIGS"):
+        want = [c.strip() for c in os.environ["HIDRA_CONFIGS"].split(",") if c.strip()]
+        bad = [c for c in want if c not in configs]
+        assert not bad, f"HIDRA_CONFIGS: unknown config(s) {bad}; available: {list(configs)}"
+        configs = {k: v for k, v in configs.items() if k in want}
+        print(f"  WARNING: partial ensemble -- {len(configs)}/5 configs ({want})", flush=True)
     t0 = time.time()
     for ci, (cfg_name, cfg) in enumerate(configs.items()):
         tc = time.time()

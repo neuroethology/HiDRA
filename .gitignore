@@ -12,6 +12,15 @@ analysis_outputs/
 *.frames.parquet
 jobs.csv
 
+# Fine-tuning (finetune.py): staged data, checkpoints, predictions, calibrated thresholds
+ft_data/
+ft_models/
+ft_preds/
+ft_thresholds.csv
+ft_scores.csv
+data/
+experiments/
+
 # Python
 __pycache__/
 *.py[cod]
