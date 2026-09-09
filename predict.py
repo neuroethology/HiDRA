@@ -157,9 +157,20 @@ def parse_jobs(path):
     if "run" in d.columns:
         d = d[d["run"].fillna(1).astype(int) == 1]
     jobs = {}
+    def _pat(r, field):
+        """A blank field means "any pair". pandas reads a blank CSV cell as NaN, and NaN is TRUTHY,
+        so a plain `or "*"` leaves it as the string "nan" -- which matches no subject, so the run
+        silently produces nothing: every head executes, the process exits 0, an empty bouts.csv is
+        written and no frames parquet at all. Indistinguishable from a behaviour that never
+        occurred. Treat NaN, None and empty alike."""
+        v = getattr(r, field, None)
+        if v is None or (isinstance(v, float) and v != v) or str(v).strip() in ("", "nan"):
+            return "*"
+        return str(v).strip()
+
     for r in d.itertuples(index=False):
-        subj = str(getattr(r, "subject", "*") or "*")
-        tgt = str(getattr(r, "target", "*") or "*")
+        subj = _pat(r, "subject")
+        tgt = _pat(r, "target")
         jobs.setdefault((str(r.lab), str(r.action)), []).append((subj, tgt))
     return jobs
 
