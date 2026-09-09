@@ -44,6 +44,8 @@ OUTPUT  (per input parquet, in --out)
   (control with --output {both,calls,probs})
 """
 import os, sys, argparse, glob, subprocess, pickle, hashlib, shutil
+
+import scratch
 os.environ.setdefault("SNIFFALL", "1")                       # register sniffall (id 37) before solution import
 os.environ.setdefault("XLA_FLAGS", "--xla_gpu_autotune_level=0")  # 6bp configs hang without this
 os.environ.setdefault("PREDICT_BATCH", "64")                 # long-video OOM guard
@@ -155,9 +157,20 @@ def parse_jobs(path):
     if "run" in d.columns:
         d = d[d["run"].fillna(1).astype(int) == 1]
     jobs = {}
+    def _pat(r, field):
+        """A blank field means "any pair". pandas reads a blank CSV cell as NaN, and NaN is TRUTHY,
+        so a plain `or "*"` leaves it as the string "nan" -- which matches no subject, so the run
+        silently produces nothing: every head executes, the process exits 0, an empty bouts.csv is
+        written and no frames parquet at all. Indistinguishable from a behaviour that never
+        occurred. Treat NaN, None and empty alike."""
+        v = getattr(r, field, None)
+        if v is None or (isinstance(v, float) and v != v) or str(v).strip() in ("", "nan"):
+            return "*"
+        return str(v).strip()
+
     for r in d.itertuples(index=False):
-        subj = str(getattr(r, "subject", "*") or "*")
-        tgt = str(getattr(r, "target", "*") or "*")
+        subj = _pat(r, "subject")
+        tgt = _pat(r, "target")
         jobs.setdefault((str(r.lab), str(r.action)), []).append((subj, tgt))
     return jobs
 
@@ -282,7 +295,8 @@ def run(folder, jobs=None, labs=None, actions=None, subject="*", target="*",
     env = dict(os.environ, SNIFFALL="1", PREDICT_BATCH="64", XLA_FLAGS="--xla_gpu_autotune_level=0",
                XLA_PYTHON_CLIENT_PREALLOCATE="false",
                CUDA_VISIBLE_DEVICES=str(gpu), CUSTOM_DIR=ds, CUSTOM_CSV="manifest.csv",
-               CUSTOM_MODE="custom", CUSTOM_OUT=outstore, PERLAB_WORKDIR=f"/dev/shm/doom_predict_{os.getpid()}")
+               CUSTOM_MODE="custom", CUSTOM_OUT=outstore,
+               PERLAB_WORKDIR=scratch.path(f"doom_predict_{os.getpid()}"))
     if weights:
         env["HIDRA_PERLAB_CKPT"] = os.path.abspath(weights)   # the subprocess runs with cwd=PKG
         print(f"using fine-tuned per-lab weights: {weights}")
