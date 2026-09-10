@@ -61,8 +61,7 @@ Download them once into `models/` (needs ~700 MB free):
 python download_models.py
 ```
 
-That fetches 11 files: 5 trunk/backbone embeddings, 5 per-lab classifier heads, and
-`thresholds.pkl`. The download resumes and skips files already present, so it is safe to re-run.
+The download resumes and skips files already present, so it is safe to re-run.
 
 ```bash
 python download_models.py --check                  # report what's missing, download nothing
@@ -70,17 +69,18 @@ python download_models.py --repo ORG/NAME          # pull from a different Hub r
 python download_models.py --revision v1.0          # pin a branch, tag, or commit
 ```
 
+That fetches 11 files as **safetensors**: 5 trunk/backbone embeddings, 5 per-lab classifier
+heads, and `thresholds.json`. safetensors executes no code on load and is read with numpy
+alone, so opening the weights needs neither JAX nor PyTorch.
+
 `--repo` / `--revision` also read from `$HIDRA_HF_REPO` / `$HIDRA_HF_REVISION`. `predict.py`
-refuses to start with weights missing and points you back here. Set `$HIDRA_MODELS_DIR` to keep
-the weights somewhere other than `models/`.
+refuses to start with weights missing and points you back here. Set `$HIDRA_MODELS_DIR` to
+keep the weights somewhere other than `models/`.
 
-Optionally convert them to safetensors, which loads without a pickle and without JAX:
-
-```bash
-hidra-convert-weights            # writes {config}_*.safetensors alongside the .pkl files
-```
-
-The PyTorch backend picks up the `.safetensors` files automatically when they exist.
+The original pickled JAX checkpoints hold the identical values and are still readable, but
+are no longer on the Hub's `main`; see [models/README.md](models/README.md) to pin them, to
+convert your own fine-tuned checkpoints (`hidra-convert-weights`), or to publish a new set
+(`hidra-publish-weights`).
 
 ## Input
 
@@ -251,11 +251,14 @@ src/hidra/
     checkpoint.py convert.py     #   read JAX pickles without JAX; write safetensors
     infer.py                     #   inference loop
     train.py train_perlab.py     #   optimizer/EMA/loop + fine-tuning driver
+  checkpoints.py                 # read/write weights in either format, no backend needed
+  publish.py                     # hidra-publish-weights: upload a weight set to the Hub
   assets/derived_thresholds_train.csv    # per-(lab,action) thresholds (incl. sniffall)
+  assets/model_card.md           # the Hugging Face model card, published by publish.py
 
 reference/                       # the pre-port JAX implementation, byte-identical, runnable
 tests/                           # JAX-vs-PyTorch exactness suite
 docs/zero-shot.md docs/fine-tuning.md docs/pytorch-port.md
-models/                          # 5x backbone + 5x per-lab head + thresholds.pkl (~660 MB,
+models/                          # 5x backbone + 5x per-lab head + thresholds.json (~660 MB,
                                  #   NOT in git -- see "Model weights" above)
 ```

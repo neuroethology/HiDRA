@@ -32,7 +32,7 @@ import numpy as np
 import pandas as pd
 
 
-from . import data, paths, schema
+from . import checkpoints, data, paths, schema
 
 # The JAX engine is imported lazily, inside the backend that uses it: importing
 # run_test_probs_perlab pulls in jax, jax.numpy and the JAX model classes, and the point of
@@ -80,7 +80,7 @@ SELF_DIRECTED = {"selfgroom", "dig", "climb", "rear", "rest", "run",
                  "biteobject", "exploreobject", "freeze", "huddle"}
 
 from .pm_rule import pm_action_ok
-TH = pickle.load(open(os.path.join(str(paths.models_dir()), "thresholds.pkl"), "rb"))
+TH = checkpoints.load_thresholds(checkpoints.resolve_thresholds(paths.models_dir()))
 LAB_HEADS = {}
 for (lab, act) in TH:
     if not pm_action_ok(lab, act):             # drop PleasantMeerkat attack/chase/escape heads

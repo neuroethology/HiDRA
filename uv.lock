@@ -197,6 +197,7 @@ dependencies = [
     { name = "numpy" },
     { name = "pandas" },
     { name = "pyarrow" },
+    { name = "safetensors" },
 ]
 
 [package.optional-dependencies]
@@ -205,7 +206,6 @@ jax = [
     { name = "numpy" },
 ]
 torch = [
-    { name = "safetensors" },
     { name = "torch" },
 ]
 
@@ -224,7 +224,7 @@ requires-dist = [
     { name = "numpy", marker = "extra == 'jax'", specifier = "<2.5" },
     { name = "pandas", specifier = ">=2.2" },
     { name = "pyarrow", specifier = ">=17" },
-    { name = "safetensors", marker = "extra == 'torch'", specifier = ">=0.4" },
+    { name = "safetensors", specifier = ">=0.4" },
     { name = "torch", marker = "extra == 'torch'", specifier = ">=2.6" },
 ]
 provides-extras = ["torch", "jax"]

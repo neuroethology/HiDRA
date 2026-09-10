@@ -31,24 +31,39 @@ def target_path(pkl_path):
     return Path(pkl_path).with_suffix(".safetensors")
 
 
+def convert_thresholds(models_dir, verify=True):
+    """Rewrite thresholds.pkl as thresholds.json -- the last pickle in the load path."""
+    from ..checkpoints import load_thresholds, save_thresholds
+
+    models_dir = Path(models_dir)
+    src = models_dir / "thresholds.pkl"
+    if not src.is_file():
+        return None
+    original = load_thresholds(src)
+    out = save_thresholds(models_dir / "thresholds.json", original)
+    if verify and load_thresholds(out) != original:
+        raise RuntimeError(f"{out}: thresholds changed during conversion")
+    return out
+
+
 def convert_one(pkl_path, out_path=None, verify=True, metadata=None):
     """Convert one checkpoint. Returns (out_path, n_tensors)."""
-    from .checkpoint import flatten_tree, load_jax_checkpoint, read_state, save_state
+    from ..checkpoints import load_flat_checkpoint, save_safetensors
 
     pkl_path = Path(pkl_path)
     out_path = target_path(pkl_path) if out_path is None else Path(out_path)
-    flat = flatten_tree(load_jax_checkpoint(pkl_path))
+    flat = load_flat_checkpoint(pkl_path)
 
     meta = {"source": pkl_path.name, "format": "hidra-jax-port-v1", "tensors": len(flat)}
     meta.update(metadata or {})
-    save_state(out_path, flat, metadata=meta)
+    save_safetensors(out_path, flat, metadata=meta)
 
     if verify:
-        back = read_state(out_path)
+        back = load_flat_checkpoint(out_path)
         if set(back) != set(flat):
             raise RuntimeError(f"{out_path}: tensor set changed during conversion")
         for key, want in flat.items():
-            got = back[key].cpu().numpy()
+            got = np.asarray(back[key])
             want = np.asarray(want)
             if got.shape != want.shape or got.dtype != want.dtype:
                 raise RuntimeError(f"{out_path}: {key} changed shape/dtype "
@@ -98,7 +113,13 @@ def main(argv=None):
         for _, _, p in todo:
             print(f"  {'ok     ' if target_path(p).is_file() else 'missing'} "
                   f"{target_path(p).name}")
-        return 0 if len(done) == len(todo) else 1
+        th_ok = (models_dir / "thresholds.json").is_file()
+        print(f"  {'ok     ' if th_ok else 'missing'} thresholds.json")
+        return 0 if (len(done) == len(todo) and th_ok) else 1
+
+    th = convert_thresholds(models_dir, verify=verify)
+    if th is not None:
+        print(f"  thresholds.pkl -> {th.name}")
 
     total = 0
     for i, (_config, _kind, pkl) in enumerate(todo, 1):

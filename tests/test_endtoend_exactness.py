@@ -270,3 +270,54 @@ def test_full_ensemble_agrees(track_dir, tmp_path_factory, stems):
     assert worst < TOL_PROB
     print(f"\nfull 5-config ensemble: {total} frame-rows, all calls and bouts identical, "
           f"worst probability difference {worst:.2e}")
+
+
+@pytest.mark.jax
+@requires_jax
+def test_both_backends_run_from_safetensors_only(track_dir, tmp_path, stems):
+    """A models directory holding only safetensors + thresholds.json must be sufficient.
+
+    This is what the Hub serves by default, so it is the configuration most users will
+    actually have. The JAX side is expected to be *bit-identical* to a pickle-based run --
+    the conversion re-containers the same float32 values and changes nothing -- which is a
+    stronger check than the cross-backend comparison and would catch any silent dtype or
+    shape drift in the converter.
+    """
+    from hidra import paths
+    from hidra.checkpoints import load_thresholds
+
+    models = paths.models_dir()
+    safetensors = sorted(models.glob("*.safetensors"))
+    if len(safetensors) < 10 or not (models / "thresholds.json").is_file():
+        pytest.skip("weights not converted; run hidra-convert-weights")
+
+    only = tmp_path / "models"
+    only.mkdir()
+    for f in safetensors:
+        (only / f.name).symlink_to(f)
+    (only / "thresholds.json").symlink_to(models / "thresholds.json")
+    assert not list(only.glob("*.pkl")), "the point of this test is that no pickle is present"
+    assert load_thresholds(only / "thresholds.json"), "thresholds.json is unusable"
+
+    from hidra.download_models import missing
+    assert missing(str(only)) == [], "downloader thinks a safetensors-only dir is incomplete"
+
+    outs = {}
+    for backend in ("jax", "torch"):
+        dest = tmp_path / f"out_{backend}"
+        res = subprocess.run(
+            [sys.executable, str(REPO / "predict.py"), str(track_dir), "--out", str(dest),
+             "--labs", LAB, "--configs", CONFIG, "--gpu", "0", "--backend", backend],
+            capture_output=True, text=True, timeout=1800, cwd=str(REPO),
+            env={**os.environ, "HIDRA_MODELS_DIR": str(only)})
+        assert res.returncode == 0, f"{backend}: {res.stdout[-2500:]}\n{res.stderr[-2500:]}"
+        assert "inference exited" not in res.stdout, res.stdout[-2500:]
+        outs[backend] = dest
+
+    key = ["subject", "target", "lab", "action", "frame"]
+    for stem in stems:
+        a = pd.read_parquet(outs["jax"] / f"{stem}.frames.parquet").sort_values(key, ignore_index=True)
+        b = pd.read_parquet(outs["torch"] / f"{stem}.frames.parquet").sort_values(key, ignore_index=True)
+        assert len(a) == len(b) > 0
+        assert (a.call.to_numpy() == b.call.to_numpy()).all(), f"{stem}: calls differ"
+        assert np.abs(a.prob.to_numpy(np.float64) - b.prob.to_numpy(np.float64)).max() < TOL_PROB

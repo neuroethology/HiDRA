@@ -22,12 +22,14 @@ dependencies = [
     "pandas>=2.2",
     "pyarrow>=17",
     "huggingface-hub>=0.34",
+    # Both backends read weights through hidra/checkpoints.py, which prefers safetensors.
+    "safetensors>=0.4",
 ]
 
 [project.optional-dependencies]
 # PyTorch inference/training backend, and the default. Self-sufficient: inference and
 # fine-tuning run with no JAX installed.
-torch = ["torch>=2.6", "safetensors>=0.4"]
+torch = ["torch>=2.6"]
 # The original JAX backend. Only needed to run `--backend jax`, and to run the exactness
 # tests that compare the two backends against each other.
 #
@@ -50,6 +52,7 @@ hidra-predict = "hidra.cli:main"
 hidra-finetune = "hidra.finetune:main"
 hidra-download-models = "hidra.download_models:main"
 hidra-convert-weights = "hidra.torch.convert:main"
+hidra-publish-weights = "hidra.publish:main"
 
 [project.urls]
 Homepage = "https://github.com/talmolab/HiDRA"

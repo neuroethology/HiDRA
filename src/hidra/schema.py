@@ -236,15 +236,13 @@ def lab_action_table(thresholds_pkl=None, sniffall=None):
     pm_rule.py), plus a merged `sniffall` head for the five labs that split sniff into
     subtypes. Sorted, because the column order is what the checkpoint was trained with.
     """
-    import pickle
-
+    from .checkpoints import load_thresholds, resolve_thresholds
     from .pm_rule import pm_action_ok
 
     if thresholds_pkl is None:
         from . import paths
-        thresholds_pkl = paths.models_dir() / "thresholds.pkl"
-    with open(thresholds_pkl, "rb") as f:
-        th = pickle.load(f)
+        thresholds_pkl = resolve_thresholds(paths.models_dir())
+    th = load_thresholds(thresholds_pkl)
     keys = [k for k in th.keys() if pm_action_ok(*k)]
     if sniffall is None:
         sniffall = bool(os.environ.get("SNIFFALL"))
