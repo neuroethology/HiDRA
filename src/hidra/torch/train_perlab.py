@@ -93,20 +93,20 @@ def load_finetune_videos():
     """
     import pandas as pd
 
-    from .. import solution
+    from .. import data
 
     if os.environ.get("HIDRA_DATA_DIR"):
-        solution.dataset_dir = os.path.abspath(os.environ["HIDRA_DATA_DIR"])
-        print(f"[DATA] dataset_dir -> {solution.dataset_dir}", flush=True)
+        data.dataset_dir = os.path.abspath(os.environ["HIDRA_DATA_DIR"])
+        print(f"[DATA] dataset_dir -> {data.dataset_dir}", flush=True)
     if os.environ.get("PERLAB_WORKDIR"):
-        solution.working_dir = os.environ["PERLAB_WORKDIR"]
-        os.makedirs(solution.working_dir, exist_ok=True)
+        data.working_dir = os.environ["PERLAB_WORKDIR"]
+        os.makedirs(data.working_dir, exist_ok=True)
 
-    csv = os.path.join(solution.dataset_dir, "train.csv")
+    csv = os.path.join(data.dataset_dir, "train.csv")
     if not os.path.isfile(csv):
-        upper = os.path.join(solution.dataset_dir, "TRAIN.csv")
+        upper = os.path.join(data.dataset_dir, "TRAIN.csv")
         if not os.path.isfile(upper):
-            sys.exit(f"ERROR: no TRAIN.csv in {solution.dataset_dir}; run "
+            sys.exit(f"ERROR: no TRAIN.csv in {data.dataset_dir}; run "
                      f"`finetune.py prepare` first")
         import shutil
         shutil.copy(upper, csv)
@@ -115,12 +115,12 @@ def load_finetune_videos():
     df["mode"] = "train"
     videos, skipped = [], 0
     for i, row in df.iterrows():
-        p = os.path.join(solution.dataset_dir, "train_tracking", str(row["lab_id"]),
+        p = os.path.join(data.dataset_dir, "train_tracking", str(row["lab_id"]),
                          f"{int(row['video_id'])}.parquet")
         if not os.path.isfile(p):
             skipped += 1
             continue
-        videos.append(solution.create_video(i, row))
+        videos.append(data.create_video(i, row))
     print(f"built {len(videos)} videos ({skipped} skipped: missing tracking)", flush=True)
     return videos
 
@@ -133,9 +133,9 @@ def split_labtail_videos(videos, config, lab, video_ids=None):
     original training already saw. `video_ids` (LABTAIL_VIDS) overrides the train side
     outright, which is how the size sweeps pick a subset.
     """
-    from .. import solution
+    from .. import data
 
-    train_videos, val_videos = solution.split_videos(
+    train_videos, val_videos = data.split_videos(
         videos, validation_frac=0.15, random_seed=config["split_seed"])
     val_videos = [v for v in val_videos if v.lab_name not in schema.TRAIN_ONLY_LABS]
 
@@ -159,16 +159,16 @@ def split_labtail_videos(videos, config, lab, video_ids=None):
 
 def build_datasets(config, train_videos, val_videos):
     """Train and validation datasets, with the original's augmentation settings."""
-    from .. import solution
+    from .. import data
 
     common = dict(seq_len=64, sample_rate=config["sample_rate"], padding=32,
                   num_bodyparts=config["num_bodyparts"], unsupervised=False)
-    train_dataset = solution.Dataset(
+    train_dataset = data.Dataset(
         videos=train_videos, num_epochs=100000, num_workers=8,
         seed=[0] + config["train_seed"],
         max_scale=config["max_scale"], max_time_dilation=config["max_time_dilation"],
         rotate=True, flip=True, noise_scale=config["noise_scale"], **common)
-    val_dataset = solution.Dataset(
+    val_dataset = data.Dataset(
         videos=val_videos, num_epochs=1, max_scale=1, max_time_dilation=1,
         rotate=False, flip=False, noise_scale=config["noise_scale"],
         num_workers=8, seed=[1] + config["train_seed"], **common)
@@ -177,12 +177,12 @@ def build_datasets(config, train_videos, val_videos):
 
 def torch_batches(dataset, batch_size, device):
     """An endless stream of device-resident batches, labels included."""
-    from .. import solution
+    from .. import data
     from .infer import to_torch_batch
 
     label_keys = ("self_labels", "cross_labels", "self_label_mask", "cross_label_mask",
                   "batch_mask")
-    for batch in solution.batch(dataset.element_iterator(), batch_size):
+    for batch in data.batch(dataset.element_iterator(), batch_size):
         tb = to_torch_batch(batch, device)
         for key in label_keys:
             tb[key] = torch.as_tensor(np.asarray(batch[key]), device=device)
@@ -199,11 +199,11 @@ def make_eval_fn(config, val_videos, device, batch_size):
     probabilities are resampled back onto video time, averaged over augmented passes, and
     swept over thresholds. A per-batch loss would rank checkpoints differently.
     """
-    from .. import solution
+    from .. import data
 
     def eval_fn(head):
-        predictions = solution.Predictions(val_videos)
-        dataset = solution.Dataset(
+        predictions = data.Predictions(val_videos)
+        dataset = data.Dataset(
             videos=val_videos, seq_len=64, sample_rate=config["sample_rate"], padding=32,
             num_bodyparts=config["num_bodyparts"], num_epochs=1, unsupervised=False,
             max_scale=1, max_time_dilation=1, rotate=False, flip=False,
@@ -211,7 +211,7 @@ def make_eval_fn(config, val_videos, device, batch_size):
             seed=[1] + config["train_seed"])
         from .infer import to_torch_batch, unbatch_numpy
         with torch.no_grad():
-            for batch in solution.batch(dataset.element_iterator(), batch_size):
+            for batch in data.batch(dataset.element_iterator(), batch_size):
                 probs = head.predict(to_torch_batch(batch, device))
                 probs = probs.detach().to("cpu", torch.float32).numpy()
                 for i in range(probs.shape[0]):

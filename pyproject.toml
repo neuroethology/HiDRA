@@ -25,15 +25,11 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-# PyTorch inference/training backend (the default going forward).
-#
-# NOTE: this extra is not yet self-sufficient. The ported *model* needs no JAX, but the numpy
-# data pipeline it shares with the original still lives in solution.py, which imports JAX at
-# module scope -- so running inference or fine-tuning today also needs the `jax` extra.
-# Install both: `uv sync --extra jax --extra torch`. See docs/pytorch-port.md.
+# PyTorch inference/training backend, and the default. Self-sufficient: inference and
+# fine-tuning run with no JAX installed.
 torch = ["torch>=2.6", "safetensors>=0.4"]
-# The original JAX backend. Needed to reproduce reference outputs and to run the
-# exactness tests that compare the two backends.
+# The original JAX backend. Only needed to run `--backend jax`, and to run the exactness
+# tests that compare the two backends against each other.
 #
 # numpy<2.5 is a hard requirement of the *reference* code, not of JAX: numpy 2.5 stopped
 # accepting nested sequences in np.random.SeedSequence, and reference/solution.py seeds its
@@ -93,7 +89,11 @@ ignore = ["E741"]
 # that correspondence is what makes the port reviewable and the exactness argument
 # checkable. Restyling them would destroy it, so only the rules that catch real breakage
 # (F: undefined/unused names, E9: syntax) apply.
-"src/hidra/solution.py" = ["E4", "E7", "I", "B", "UP"]
+# solution.py additionally: `batch` is a parameter name throughout the reference code, and
+# the module deliberately re-exports data.batch for back-compat, so F811 fires on every
+# method signature.
+"src/hidra/solution.py" = ["E4", "E7", "I", "B", "UP", "F811"]
+"src/hidra/data.py" = ["E4", "E7", "I", "B", "UP"]
 "src/hidra/schema.py" = ["E4", "E7", "I", "B", "UP"]
 "src/hidra/train_perlab_heads.py" = ["E4", "E7", "I", "B", "UP"]
 "src/hidra/run_allbehaviors_perlab.py" = ["E4", "E7", "I", "B", "UP"]

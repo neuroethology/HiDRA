@@ -21,19 +21,14 @@ Python 3.12+ and an NVIDIA GPU (driver ≥ 525). HiDRA is a normal Python packag
 with [uv](https://docs.astral.sh/uv/):
 
 ```bash
-uv sync --extra jax --extra torch     # in a checkout: creates .venv
+uv sync --extra torch          # in a checkout: creates .venv
 ```
 
 or into an existing environment:
 
 ```bash
-pip install 'hidra[jax,torch] @ git+https://github.com/talmolab/HiDRA'
+pip install 'hidra[torch] @ git+https://github.com/talmolab/HiDRA'
 ```
-
-Both extras, for now. The models run on PyTorch and need no JAX, but the numpy data pipeline
-they share with the original implementation still lives in a module that imports JAX at import
-time — so the JAX runtime is still required to *run* anything. Splitting that out is the one
-remaining step; see [docs/pytorch-port.md](docs/pytorch-port.md#what-is-left-before-jax-can-be-dropped).
 
 That gives you the `hidra-predict`, `hidra-finetune` and `hidra-download-models` commands, an
 importable `hidra` package, and the root-level `predict.py` / `finetune.py` scripts if you
@@ -52,7 +47,8 @@ python predict.py tracking/ --out results/ --pix-per-cm 16 --fps 30             
 python predict.py tracking/ --out results/ --pix-per-cm 16 --fps 30 --backend jax    # original
 ```
 
-Both backends come from the install above, which is also what the equivalence tests require.
+`--backend jax` needs the original backend too — `uv sync --extra jax --extra torch`, which is
+also what the equivalence tests require. The default PyTorch path needs no JAX at all.
 
 ### Model weights
 

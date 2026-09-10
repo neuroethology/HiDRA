@@ -196,8 +196,15 @@ def test_padded_batch_does_not_corrupt_real_rows(config, videos, torch_head, dev
     padded = batches[-1]
     n_real = int((padded["batch_mask"] == 1).sum())
     assert (padded["batch_mask"] == 0).any(), "expected a short final batch"
-    assert not ((padded["lab_id"] >= 0) & (padded["lab_id"] < 21)).all(), \
-        "padding rows should carry an out-of-range lab_id (uninitialized memory)"
+
+    # Force the hazard rather than hoping for it. `np.empty_like` hands back whatever was in
+    # that memory: sometimes obvious garbage (1072902963 was observed), sometimes a
+    # plausible-looking lab id recycled from a previous element -- which is worse, because
+    # it silently selects the wrong lab's heads. Pin a value that is definitely out of range
+    # so the clamping path is exercised on every run, not just the lucky ones.
+    padded = {k: v.copy() for k, v in padded.items()}
+    padded["lab_id"][n_real:] = 1072902963
+    assert not ((padded["lab_id"] >= 0) & (padded["lab_id"] < 21)).all()
 
     with torch.no_grad():
         full = torch_head.predict(to_torch_batch(padded, device)).float().cpu().numpy()

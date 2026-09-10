@@ -13,6 +13,7 @@ What is asserted, and why the thresholds are what they are:
   saved probability tracks are cast to float16, whose spacing near 1.0 is ~1e-3.
 * **Bout boundaries must match exactly**, since they are derived from the calls.
 """
+import os
 import pathlib
 import subprocess
 import sys
@@ -81,6 +82,14 @@ def test_frames_agree(both_backends, stems):
 
         pa = a.prob.to_numpy(np.float64)
         pb = b.prob.to_numpy(np.float64)
+        # Both sides must be probabilities. A value above 1 is the signature of P routing
+        # several heads into one action instead of selecting one, which is what happens if
+        # P is built through the patched LABS.encode the drivers install; it once produced
+        # values above 3.0 on the JAX side. Cheap to assert, and it localizes instantly.
+        for name, values in (("jax", pa), ("torch", pb)):
+            assert values.min() >= 0.0 and values.max() <= 1.0, (
+                f"{stem}: {name} produced out-of-range probabilities "
+                f"{values.min():.4f}..{values.max():.4f}")
         diff = np.abs(pa - pb)
         worst = max(worst, diff.max())
         assert diff.max() < TOL_PROB, (
@@ -184,40 +193,42 @@ print("OK", tuple(probs.shape))
     assert "OK" in out.stdout
 
 
-@pytest.mark.xfail(strict=True, reason="solution.py imports jax at module scope, so the "
-                                       "shared numpy data pipeline still drags in the "
-                                       "runtime; splitting it out is the remaining work")
-def test_full_torch_inference_needs_no_jax(track_dir):
-    """The *whole* torch path -- data pipeline included -- with JAX unavailable.
+def test_full_torch_inference_needs_no_jax(track_dir, tmp_path):
+    """The whole PyTorch path -- CLI, data pipeline, subprocess driver -- with JAX absent.
 
-    `hidra.torch.infer` reuses `solution.Dataset` and `solution.Predictions` on purpose:
-    they are pure numpy and deterministically seeded, so a backend comparison isolates the
-    model arithmetic and nothing else. The cost is that `solution` imports JAX at module
-    scope, so this fails today. xfail(strict=True) means that when the data pipeline is
-    split out, this XPASSes, the suite goes red, and the marker has to be deleted -- the
-    promise cannot quietly rot.
+    JAX is blocked via a `sitecustomize.py` on PYTHONPATH rather than only in this process,
+    because `cli.run` shells out to `hidra.run_allbehaviors_perlab`: blocking it here would
+    leave the subprocess free to import JAX and the test would pass for the wrong reason.
+
+    This is the assertion the port exists to make. It replaced an xfail that tracked the
+    same claim while the numpy data pipeline still lived in `solution.py`.
     """
-    script = f"""
-import sys
+    block = tmp_path / "block"
+    block.mkdir()
+    (block / "sitecustomize.py").write_text(
+        "import sys\n"
+        "class _Blocker:\n"
+        "    def find_spec(self, name, path=None, target=None):\n"
+        "        if name == 'jax' or name.startswith('jax.'):\n"
+        "            raise ImportError('jax is blocked for this test')\n"
+        "        return None\n"
+        "sys.meta_path.insert(0, _Blocker())\n")
 
-class Blocker:
-    def find_spec(self, name, path=None, target=None):
-        if name == "jax" or name.startswith("jax."):
-            raise ImportError("jax is blocked for this test")
-        return None
+    out = tmp_path / "out"
+    env = {**os.environ, "PYTHONPATH": os.pathsep.join([str(block), str(REPO / "src")])}
+    res = subprocess.run(
+        [sys.executable, str(REPO / "predict.py"), str(track_dir), "--out", str(out),
+         "--labs", "GroovyShrew", "--configs", CONFIG, "--gpu", "0", "--backend", "torch"],
+        capture_output=True, text=True, timeout=1800, cwd=str(REPO), env=env)
+    assert res.returncode == 0, f"stdout={res.stdout[-3000:]}\nstderr={res.stderr[-3000:]}"
+    assert "inference exited" not in res.stdout, res.stdout[-3000:]
+    assert "jax is blocked" not in res.stdout + res.stderr, \
+        "something still reached for jax:\n" + (res.stdout + res.stderr)[-3000:]
 
-sys.meta_path.insert(0, Blocker())
-sys.argv = ["predict.py"]
-
-import hidra.cli as cli
-cli.run({str(track_dir)!r}, out="/tmp/hidra_nojax_out", labs=["GroovyShrew"],
-        actions=["rear"], pix_per_cm=16, fps=30, configs=["15fps_5bp"], backend="torch")
-assert "jax" not in sys.modules, sorted(m for m in sys.modules if "jax" in m)
-print("OK")
-"""
-    out = subprocess.run([sys.executable, "-c", script], capture_output=True, text=True,
-                         timeout=1200, cwd=str(REPO))
-    assert out.returncode == 0, f"stdout={out.stdout[-2000:]}\nstderr={out.stderr[-3000:]}"
+    frames = out / "synth00.frames.parquet"
+    assert frames.is_file(), "no probability track written"
+    got = pd.read_parquet(frames)
+    assert len(got) > 0 and got.prob.between(0, 1).all()
 
 
 @pytest.mark.jax

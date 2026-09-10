@@ -32,8 +32,20 @@ import numpy as np
 import pandas as pd
 
 
-from . import paths, solution
-from .run_test_probs_perlab import predict_into   # MultiTaskPerLabModel + perlab ckpt
+from . import data, paths, schema
+
+# The JAX engine is imported lazily, inside the backend that uses it: importing
+# run_test_probs_perlab pulls in jax, jax.numpy and the JAX model classes, and the point of
+# the PyTorch backend is not to need them. Everything this driver itself touches -- the
+# label vocabularies, video construction, the Predictions accumulator -- comes from
+# schema.py and data.py, which are numpy-only.
+
+
+def _predict_into_jax(config, predictions, num_epochs, dtype):
+    """The original JAX engine."""
+    from .run_test_probs_perlab import predict_into
+
+    return predict_into(config, predictions, num_epochs, dtype)
 
 
 def _predict_into_torch(config, predictions, num_epochs, dtype):
@@ -56,7 +68,7 @@ def _predict_into_torch(config, predictions, num_epochs, dtype):
     torch_predict_into(config, predictions, head, num_epochs=num_epochs, device=device)
 
 
-BACKENDS = {"jax": predict_into, "torch": _predict_into_torch}
+BACKENDS = {"jax": _predict_into_jax, "torch": _predict_into_torch}
 
 # Researcher-private analysis trees. Only meaningful in a source checkout with the
 # original dataset layout; `hidra predict` uses the "custom" dataset entry instead.
@@ -164,8 +176,8 @@ class AllBehaviorLabels:
     Predictions.update key every action correctly (self->(a,a), cross->(a,t))."""
 
     def __init__(self, num_frames, mouse_ids):
-        self_acts = [solution.ACTIONS.encode(a) for a in SELF_DIRECTED]
-        cross_acts = [i for i in range(1, len(solution.ACTIONS))
+        self_acts = [schema.ACTIONS.encode(a) for a in SELF_DIRECTED]
+        cross_acts = [i for i in range(1, len(schema.ACTIONS))
                       if i not in self_acts]
         self.label_index, self.label_masks, self.labeled_behaviors = [], [], []
         for a in mouse_ids:                                   # self pairs
@@ -225,7 +237,7 @@ def load_videos(ds, shard, smoke):
                           f"{int(row['video_id'])}.parquet")
         if not os.path.isfile(tp):
             continue
-        vids.append(solution.create_video(idx, row))
+        vids.append(data.create_video(idx, row))
     return vids
 
 
@@ -245,17 +257,17 @@ def main():
     run_config = BACKENDS[args.backend]
 
     ds = DATASETS[args.dataset]
-    solution.dataset_dir = ds["dir"]
+    data.dataset_dir = ds["dir"]
     # PERLAB_WORKDIR lets each parallel job own a private tracking-cache dir so
     # concurrent labs don't race-write the shared mode-keyed {working_dir}/{mode}/*.bin.
-    solution.working_dir = os.environ.get("PERLAB_WORKDIR") or (
+    data.working_dir = os.environ.get("PERLAB_WORKDIR") or (
         os.path.join(os.path.dirname(ds["dir"]), "working")
-        if args.dataset != "test" else solution.working_dir)
+        if args.dataset != "test" else data.working_dir)
     # test.csv shim for create_video paths that expect lowercase
     if args.dataset == "test" and not os.path.isfile(f"{ds['dir']}/test.csv"):
         import shutil; shutil.copy(f"{ds['dir']}/TEST.csv", f"{ds['dir']}/test.csv")
     os.makedirs(ds["out"], exist_ok=True)
-    os.makedirs(solution.working_dir, exist_ok=True)
+    os.makedirs(data.working_dir, exist_ok=True)
     # The _sniffall checkpoints are now the canonical 90-head model: SNIFFALL runs
     # emit the FULL per-lab head set for EVERY lab (not just the 5 split labs'
     # sniffall head), into the primary {lab}.pkl store.
@@ -267,8 +279,8 @@ def main():
         print(f"{out_path} exists, skipping"); return
 
     L = args.embedding_lab
-    emb_idx = int(solution.LABS.encode(L))
-    solution.LABS.encode = lambda v, _i=emb_idx: _i     # embedding+heads -> L; keep real lab_name
+    emb_idx = int(schema.LABS.encode(L))
+    schema.LABS.encode = lambda v, _i=emb_idx: _i     # embedding+heads -> L; keep real lab_name
     heads = LAB_HEADS[L]   # ALL of lab L's heads (incl. sniffall for the 5 split labs)
     print(f"[{args.dataset}/{L}] {len(heads)} heads: {sorted(heads)}", flush=True)
 
@@ -277,8 +289,8 @@ def main():
         v.labels = AllBehaviorLabels(num_frames=v.num_frames, mouse_ids=v.tracking_data.mouse_index)
     print(f"[{args.dataset}/{L}] {len(vids)} videos (all-pairs all-behaviors labels)", flush=True)
 
-    preds = solution.Predictions(vids)
-    configs = solution.get_configs()
+    preds = data.Predictions(vids)
+    configs = schema.get_configs()
     # HIDRA_CONFIGS: run a SUBSET of the 5-config ensemble (comma-separated config names).
     # Cheaper and lower quality -- for iterating on a single fine-tuned config, not for results.
     if os.environ.get("HIDRA_CONFIGS"):
@@ -296,10 +308,10 @@ def main():
 
     probs = preds.average_probs()
     keep = {k: v.astype("float16") for k, v in probs.items()
-            if solution.ACTIONS.decode(k[3]) in heads}
+            if schema.ACTIONS.decode(k[3]) in heads}
     with open(out_path, "wb") as f:
         pickle.dump(keep, f)
-    acts = sorted({solution.ACTIONS.decode(k[3]) for k in keep})
+    acts = sorted({schema.ACTIONS.decode(k[3]) for k in keep})
     self_present = sorted(set(acts) & SELF_DIRECTED)
     print(f"[{args.dataset}/{L}] saved {len(keep)} tracks, actions={acts}\n"
           f"   self-directed present: {self_present}\n"

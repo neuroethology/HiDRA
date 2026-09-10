@@ -2,38 +2,18 @@
 `run_test_probs_perlab.predict_into`.
 
 The data pipeline is *deliberately shared* with the JAX path: this calls the very same
-`solution.Dataset` and `solution.Predictions`, which are pure numpy and seeded
+`hidra.data.Dataset` and `hidra.data.Predictions`, which are pure numpy and seeded
 deterministically. Only the model is swapped. That is what makes a backend comparison
 meaningful -- identical augmented clips in, identical accumulation out, so any difference
 in the probability tracks is attributable to the model arithmetic and nothing else.
 
-(`solution` still imports JAX at module scope, so this module transitively needs it today.
-Moving the numpy data pipeline out of `solution.py` is what finally drops that dependency;
-see docs/pytorch-port.md.)
+`hidra.data` imports numpy and nothing else, so this module -- and the whole PyTorch
+inference path -- needs no JAX runtime.
 """
 import os
 
 import numpy as np
 import torch
-
-_NO_JAX_HINT = (
-    "The PyTorch backend still needs the JAX runtime installed, because the numpy data "
-    "pipeline (solution.Dataset / solution.Predictions) lives in a module that imports JAX "
-    "at import time. The model itself does not use JAX.\n"
-    "  Install it:  uv sync --extra jax --extra torch    (or: pip install 'hidra[jax,torch]')\n"
-    "See docs/pytorch-port.md, 'What is left before JAX can be dropped'."
-)
-
-
-def _solution():
-    """`hidra.solution`, with an actionable message when JAX is absent."""
-    try:
-        from .. import solution
-    except ModuleNotFoundError as exc:  # pragma: no cover - depends on the install
-        if exc.name and exc.name.split(".")[0] == "jax":
-            raise ModuleNotFoundError(_NO_JAX_HINT) from exc
-        raise
-    return solution
 
 # Batch keys the model consumes, and the dtype each must arrive in.
 _MODEL_INPUTS = {
@@ -56,9 +36,9 @@ def make_dataset(config, videos, num_epochs=1, seed=None):
     inference averages several augmented passes per video, so the augmentation
     distribution is part of the model's definition, not a training-time detail.
     """
-    solution = _solution()
+    from .. import data
 
-    return solution.Dataset(
+    return data.Dataset(
         videos=videos,
         seq_len=64,
         sample_rate=config["sample_rate"],
@@ -85,18 +65,20 @@ def to_torch_batch(batch, device):
 
 
 def unbatch_numpy(batch, index):
-    """One element out of a batched numpy dict, mirroring `solution.unbatch`."""
+    """One element out of a batched numpy dict, mirroring `data.unbatch`."""
     return {k: v[index].copy() for k, v in batch.items()}
 
 
 def iter_batches(dataset, batch_size):
     """Batched elements from the dataset, using the JAX path's own batching helper.
 
-    `solution.batch` pads a short final batch and flags it with `batch_mask=0`, which
+    `data.batch` pads a short final batch and flags it with `batch_mask=0`, which
     `Predictions.update` then skips. Reusing it keeps the element-to-batch assignment --
     and therefore the padding behaviour -- identical across backends.
     """
-    yield from _solution().batch(dataset.element_iterator(), batch_size)
+    from .. import data
+
+    yield from data.batch(dataset.element_iterator(), batch_size)
 
 
 @torch.no_grad()

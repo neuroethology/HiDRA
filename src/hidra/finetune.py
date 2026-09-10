@@ -210,7 +210,7 @@ def cmd_prepare(args):
 
     man = pd.DataFrame(rows)
     man.to_csv(os.path.join(args.out, "TRAIN.csv"), index=False)
-    # train.csv is what solution.load_videos reads; the trainer copies TRAIN.csv over if absent,
+    # train.csv is what the trainers read; they copy TRAIN.csv over if it is absent,
     # but writing both keeps a re-prepared dataset from being shadowed by a stale train.csv.
     man.to_csv(os.path.join(args.out, "train.csv"), index=False)
     print(f"\nstaged {len(man)} video(s) for lab {args.lab} -> {args.out}/")

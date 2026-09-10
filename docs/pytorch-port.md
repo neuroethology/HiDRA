@@ -187,29 +187,56 @@ A fine-tune done on either backend is written in the **JAX variable layout**, so
 resulting checkpoint loads under either backend through `predict.py --weights`. Fine-tuning
 costs five configs of GPU time; a checkpoint should not be stranded by a backend choice.
 
-## What is left before JAX can be dropped
+## JAX is no longer required
 
-One thing: **the numpy data pipeline still lives in `solution.py`, which imports JAX at
-module scope.**
+The numpy data pipeline now lives in `hidra/data.py`, which imports numpy and nothing else.
+Inference and fine-tuning run with JAX absent:
 
-`hidra.torch.infer` reuses `solution.Dataset` and `solution.Predictions` deliberately. Both
-are pure numpy and deterministically seeded, so running them on both backends isolates the
-comparison to the model arithmetic — which is exactly what made the end-to-end result above
-meaningful. The cost is that the torch path transitively imports JAX.
+```bash
+uv sync --extra torch     # no jax
+python predict.py tracking/ --out results/ --pix-per-cm 16 --fps 30
+python finetune.py train --data ft_data/ --lab GroovyShrew --actions rear --out ft_models/
+```
 
-The model side is already free of it: `tests/test_endtoend_exactness.py::
-test_model_loading_needs_no_jax` builds the models, loads their weights and predicts with
-`jax` blocked in `sys.meta_path`. The full path is not, and
-`test_full_torch_inference_needs_no_jax` is `xfail(strict=True)` for that reason — when the
-data pipeline is split out it will XPASS, the suite will go red, and the marker will have to
-be deleted. The promise cannot quietly rot.
+`tests/test_endtoend_exactness.py::test_full_torch_inference_needs_no_jax` asserts it by
+running the real CLI with `jax` blocked in `sys.meta_path` — via a `sitecustomize.py` on
+`PYTHONPATH`, not just in the test process, because `cli.run` shells out to a subprocess that
+would otherwise be free to import it.
 
-The remaining work is mechanical: move `TrackingData`, `Labels`, `Video`, `Dataset`,
-`Predictions`, `F1` and the `batch`/`unbatch`/`Pipeline` helpers into a `hidra/data.py` that
-imports only numpy. Only the pipeline helpers touch JAX at all, and only for `jax.tree.*`
-pytree operations over what are always flat dicts of arrays — so a per-key stack/index is an
-exact replacement. The path globals (`dataset_dir`, `working_dir`, `persist_dir`) are
-reassigned by the entry points and need a single owner when they move.
+`hidra.data` holds `TrackingData`, `Labels`, `Video`, `Dataset`, `Predictions`, `F1` and the
+stream helpers. `solution.py` re-exports every name — the same objects, so
+`solution.Dataset is data.Dataset` and a driver monkeypatching one affects both backends —
+and forwards reads *and writes* of the four path globals (`dataset_dir`, `working_dir`,
+`persist_dir`, `project_dir`) onto `data`. Forwarding writes matters: entry points have
+always set them as `solution.working_dir = ...`, and a plain re-import would let such an
+assignment shadow the real value, so the tracking cache would be built where no reader looks
+and nothing would complain.
+
+The `jax` extra is now needed only for `--backend jax` and for the exactness tests that
+compare the backends against each other.
+
+### Two hazards the split exposed
+
+Both were caught by the end-to-end comparison, and both now have regression tests in
+`tests/test_data_pipeline.py`.
+
+**The stream helpers are not flat-dict-only.** `predict_into` maps the stream through a
+function returning `(batch, probs)`, so everything downstream of it — `to_host`, `unbatch`,
+`get_batch_size` — carries a *tuple* whose first element is the batch dict. `jax.tree.*`
+handled that structure for free. A dict-only replacement raised `'tuple' object has no
+attribute 'items'` the moment the JAX engine ran, so `data.py` carries real `tree_map` /
+`tree_leaves` / `tree_stack` over dicts, lists and tuples.
+
+**`build_P` must not be built through a patched `LABS.encode`.** The inference drivers force
+one lab's embedding by *replacing* that attribute with a constant. A P built through it
+routes every lab's head into a single row, and the readout einsum then sums all 82 heads
+instead of selecting one. The original guarded against this by capturing the encoder at
+import time — which only works while `train_perlab_heads` is imported *before* the patch is
+applied. Making the JAX engine import lazily (so the torch path does not drag it in) broke
+that ordering, and probabilities came out above 3.0. Both `build_P` implementations now index
+`value_to_idx`, a plain dict the patch never touches, which removes the ordering dependency
+rather than depending on it. The end-to-end test additionally asserts that every probability
+lies in [0, 1] on both backends, which localizes this class of bug instantly.
 
 ## Reproducing the numbers
 

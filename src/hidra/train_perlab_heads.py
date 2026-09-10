@@ -389,19 +389,26 @@ def _load_disent_ae(config_name):
     return mu, sd, enc, int(d.get("D_DYN", 128))
 # ------------------------------------------------------------------------------
 
-# Capture the ORIGINAL encoders at import (before any caller monkeypatches
-# solution.LABS.encode for an embedding override). run_test_probs_perlab.py
-# replaces LABS.encode with a constant to force batch["lab_id"]; if build_P
-# used that patched encoder it would assign ALL labs' heads to one P row and
-# the predict() einsum would SUM heads (probs > 1, wrong cross-lab readout).
-_LABS_ENCODE_ORIG = solution.LABS.encode
-_ACTIONS_ENCODE_ORIG = solution.ACTIONS.encode
+# run_test_probs_perlab.py / run_allbehaviors_perlab.py force one lab's embedding by
+# REPLACING LABS.encode with a constant. Built through that patched encoder, P would assign
+# every lab's head to a single row and predict()'s einsum would SUM all 82 heads into each
+# action instead of selecting one -- probabilities above 1 and a meaningless cross-lab
+# readout.
+#
+# The original guarded against this by capturing the encoders at import time, which works
+# only while this module is imported *before* the patch is applied. That is a live hazard:
+# the PyTorch backend imports the JAX engine lazily, so this module can now be imported
+# after main() has already patched, and the capture would grab the patched function.
+# Indexing value_to_idx instead removes the ordering dependency altogether -- the patch
+# replaces the `encode` attribute and never touches the dict.
+_LABS_ENCODE_ORIG = solution.LABS.value_to_idx.__getitem__
+_ACTIONS_ENCODE_ORIG = solution.ACTIONS.value_to_idx.__getitem__
 
 
 def build_P():
     P = np.zeros((len(solution.LABS), len(solution.ACTIONS), N_HEADS), dtype="float32")
     for j, (lab, act) in enumerate(LAB_ACTION):
-        P[_LABS_ENCODE_ORIG(lab), _ACTIONS_ENCODE_ORIG(act), j] = 1.0
+        P[solution.LABS.value_to_idx[lab], solution.ACTIONS.value_to_idx[act], j] = 1.0
     return jnp.asarray(P)
 
 

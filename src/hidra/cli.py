@@ -61,18 +61,21 @@ DEFAULT_THR = 0.30
 THR_CSV = str(paths.thresholds_csv())
 
 
-def _solution():
-    from . import solution
-    return solution
+def _schema():
+    """The label vocabularies. Imported lazily and from `schema`, not `solution`: the CLI
+    must not pull in the JAX runtime just to name an action or validate a bodypart, since
+    the PyTorch backend does not need it."""
+    from . import schema
+    return schema
 
 
 def action_names():
-    s = _solution()
+    s = _schema()
     return {i: s.ACTIONS.decode(i) for i in range(len(s.ACTIONS))}
 
 
 def bodypart_schema():
-    s = _solution()
+    s = _schema()
     allbp = set(s.BODYPARTS.decode(i) for i in range(len(s.BODYPARTS)))
     canon7 = [s.BODYPARTS.decode(i) for i in range(7)]
     return allbp, canon7
