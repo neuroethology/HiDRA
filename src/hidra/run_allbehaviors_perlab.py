@@ -31,10 +31,32 @@ import time
 import numpy as np
 import pandas as pd
 
-import jax
 
 from . import paths, solution
 from .run_test_probs_perlab import predict_into   # MultiTaskPerLabModel + perlab ckpt
+
+
+def _predict_into_torch(config, predictions, num_epochs, dtype):
+    """The PyTorch backend's equivalent of run_test_probs_perlab.predict_into.
+
+    Same dataset, same Predictions accumulator, same per-config averaging -- only the
+    model changes. HIDRA_PERLAB_CKPT is honoured by load_perlab, so fine-tuned weights
+    thread through exactly as on the JAX path.
+    """
+    import torch
+
+    from .torch import load_perlab, load_unsupervised
+    from .torch.infer import predict_into as torch_predict_into
+
+    tdtype = {"float32": torch.float32, "float64": torch.float64,
+              "bfloat16": torch.bfloat16, "float16": torch.float16}[dtype]
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    trunk = load_unsupervised(config["name"], dtype=tdtype, device=device, config=config)
+    head = load_perlab(config["name"], trunk, dtype=tdtype, device=device, config=config)
+    torch_predict_into(config, predictions, head, num_epochs=num_epochs, device=device)
+
+
+BACKENDS = {"jax": predict_into, "torch": _predict_into_torch}
 
 # Researcher-private analysis trees. Only meaningful in a source checkout with the
 # original dataset layout; `hidra predict` uses the "custom" dataset entry instead.
@@ -215,7 +237,12 @@ def main():
     ap.add_argument("--epochs", type=int, default=1)
     ap.add_argument("--dtype", default="float32")
     ap.add_argument("--smoke", type=int, default=0)
+    ap.add_argument("--backend", default=os.environ.get("HIDRA_BACKEND", "jax"),
+                    choices=sorted(BACKENDS),
+                    help="model backend: 'jax' (the original) or 'torch' (the port). "
+                         "Also settable with $HIDRA_BACKEND.")
     args = ap.parse_args()
+    run_config = BACKENDS[args.backend]
 
     ds = DATASETS[args.dataset]
     solution.dataset_dir = ds["dir"]
@@ -263,8 +290,9 @@ def main():
     t0 = time.time()
     for ci, (cfg_name, cfg) in enumerate(configs.items()):
         tc = time.time()
-        predict_into(cfg, preds, args.epochs, args.dtype)
-        print(f"  [{ci+1}/{len(configs)}] {cfg_name} {time.time()-tc:.0f}s", flush=True)
+        run_config(cfg, preds, args.epochs, args.dtype)
+        print(f"  [{ci+1}/{len(configs)}] {cfg_name} {time.time()-tc:.0f}s "
+              f"[{args.backend}]", flush=True)
 
     probs = preds.average_probs()
     keep = {k: v.astype("float16") for k, v in probs.items()

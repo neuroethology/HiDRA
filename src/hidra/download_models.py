@@ -11,7 +11,9 @@ downloaded once:
 Override the source repo with --repo or the HIDRA_HF_REPO environment variable, and pin a
 particular upload with --revision (a branch, tag, or commit sha).
 """
-import os, sys, argparse
+import argparse
+import os
+import sys
 
 from . import paths
 

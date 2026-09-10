@@ -12,8 +12,6 @@ one) never requires JAX to be installed.
 the path separator, in safetensors: a plain tensor container with no code execution on
 load, unlike pickle.
 """
-import io
-import json
 import pickle
 from pathlib import Path
 

@@ -60,12 +60,13 @@ def thresholds(path=THRESHOLDS):
 
 def predict(folder, out="doom_predictions", labs=None, actions=None, subject="*", target="*",
             pix_per_cm=None, fps=None, jobs=None, gpu="0", output="both", weights=None,
-            thresholds=THRESHOLDS, threshold=None, keep_work=False):
+            thresholds=THRESHOLDS, threshold=None, keep_work=False, backend="torch"):
     """Run the ensemble over `folder` and return the bouts DataFrame (see run() for the
     full argument list; this is the same call predict.py's CLI makes)."""
     _p.run(folder, jobs=jobs, labs=labs, actions=actions, subject=subject, target=target,
            out=out, pix_per_cm=pix_per_cm, fps=fps, gpu=gpu, output=output,
-           keep_work=keep_work, weights=weights, thresholds=thresholds, threshold=threshold)
+           keep_work=keep_work, weights=weights, thresholds=thresholds, threshold=threshold,
+           backend=backend)
     return bouts(out) if output in ("both", "calls") else frames(out)
 
 

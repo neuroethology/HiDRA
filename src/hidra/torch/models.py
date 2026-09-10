@@ -21,13 +21,14 @@ import torch
 import torch.nn as nn
 
 from .layers import (
+    LSTM,
     STAGE_EVAL,
     BidirectionalLSTM,
     Constant,
     Embedding,
     HidraModule,
     Linear,
-    LSTM,
+    jax_gather_index,
     silu,
 )
 
@@ -57,7 +58,9 @@ class UnsupervisedModel(HidraModule):
         max_norms_30 = {1: 19, 2: 34, 3: 46, 4: 57}
         self.lag_max_norms = {k: self.norm_rescale * v for k, v in max_norms_30.items()}
 
-        lin = lambda i, o, bd=(): Linear(i, o, batch_dims=bd, dtype=dtype, device=device)
+        def lin(i, o, bd=()):
+            return Linear(i, o, batch_dims=bd, dtype=dtype, device=device)
+
         L = nn.ModuleDict()
         L["x-emb"] = Constant((n_bp, d_res), dtype=dtype, device=device)
         for lag in self.lags:
@@ -102,7 +105,9 @@ class UnsupervisedModel(HidraModule):
         cross_dx = (cross_dx / cross_norms) * torch.sqrt(cross_norms)
         cross_dx = torch.where(torch.isnan(cross_dx), torch.zeros_like(cross_dx), cross_dx)
 
-        cast = lambda t: t.to(self.compute_dtype)
+        def cast(t):
+            return t.to(self.compute_dtype)
+
         return cast(self_dx), cast(self_adj), cast(cross_dx), cast(cross_adj)
 
     # ---------------------------------------------------------------- node embedding
@@ -217,7 +222,9 @@ class MultiTaskPerLabModel(HidraModule):
         # this module's state_dict (they live in their own checkpoint).
         object.__setattr__(self, "unsupervised_model", unsupervised_model)
 
-        lin = lambda i, o, bd=(): Linear(i, o, batch_dims=bd, dtype=dtype, device=device)
+        def lin(i, o, bd=()):
+            return Linear(i, o, batch_dims=bd, dtype=dtype, device=device)
+
         L = nn.ModuleDict()
         L["ff-merge-in"] = lin(2 * feat_dim, node_dim, (n_bp,))
         L["ff-merge-out"] = lin(node_dim, node_dim, (n_bp,))
@@ -281,7 +288,8 @@ class MultiTaskPerLabModel(HidraModule):
         makes `run_allbehaviors_perlab` able to filter by head afterwards.
         """
         probs = torch.sigmoid(self.logits_perlab(batch))
-        Pb = self.P[batch["lab_id"].long()]
+        # Same clamping gather as the lab embedding: padding rows carry garbage lab ids.
+        Pb = self.P[jax_gather_index(batch["lab_id"], self.P.shape[0])]
         return torch.einsum("btj,baj->bta", probs, Pb)
 
 

@@ -26,7 +26,7 @@ dependencies = [
 
 [project.optional-dependencies]
 # PyTorch inference/training backend (the default going forward).
-torch = ["torch>=2.6"]
+torch = ["torch>=2.6", "safetensors>=0.4"]
 # The original JAX backend. Needed to reproduce reference outputs and to run the
 # exactness tests that compare the two backends.
 #
@@ -71,6 +71,27 @@ markers = [
 [tool.ruff]
 line-length = 110
 target-version = "py312"
+# reference/ is a frozen copy of the pre-port originals (see reference/README.md); linting
+# it would only invite edits, and tests/test_reference_pristine.py forbids those.
+extend-exclude = ["reference"]
 
 [tool.ruff.lint]
+# Pinned explicitly rather than relying on ruff's default set, which widens between
+# releases and would make CI results depend on the ruff version.
+select = ["E4", "E7", "E9", "F", "I", "B", "UP"]
+# `l` as a loop variable is used throughout the model code for the layer index, matching
+# the paper-ish notation in the original.
 ignore = ["E741"]
+
+[tool.ruff.lint.per-file-ignores]
+# These modules came over from reference/ and are kept line-for-line diffable against it --
+# that correspondence is what makes the port reviewable and the exactness argument
+# checkable. Restyling them would destroy it, so only the rules that catch real breakage
+# (F: undefined/unused names, E9: syntax) apply.
+"src/hidra/solution.py" = ["E4", "E7", "I", "B", "UP"]
+"src/hidra/schema.py" = ["E4", "E7", "I", "B", "UP"]
+"src/hidra/train_perlab_heads.py" = ["E4", "E7", "I", "B", "UP"]
+"src/hidra/run_allbehaviors_perlab.py" = ["E4", "E7", "I", "B", "UP"]
+"src/hidra/run_test_probs_perlab.py" = ["E4", "E7", "I", "B", "UP"]
+"src/hidra/cli.py" = ["E4", "E7", "I", "B", "UP"]
+"src/hidra/finetune.py" = ["E4", "E7", "I", "B", "UP"]

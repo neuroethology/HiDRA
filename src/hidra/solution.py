@@ -2590,7 +2590,7 @@ def train_ensemble():
 
 def test_ensemble():
     configs = get_configs()
-    print(f"Loading test videos...", flush=True)
+    print("Loading test videos...", flush=True)
     test_videos = load_videos(mode="test", use_cached=True)
     print(f"Loaded {len(test_videos)} test videos", flush=True)
     test_predictions = Predictions(test_videos)

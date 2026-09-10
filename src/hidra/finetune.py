@@ -47,7 +47,6 @@ See docs/fine-tuning.md for what each mode trains, how much data helps, and the 
 """
 import argparse
 import glob
-import hashlib
 import json
 import os
 import shutil

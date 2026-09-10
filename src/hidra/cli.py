@@ -216,7 +216,8 @@ def runs(mask):
 
 def run(folder, jobs=None, labs=None, actions=None, subject="*", target="*",
         out="doom_predictions", pix_per_cm=None, fps=None, gpu="0", output="both",
-        keep_work=False, weights=None, thresholds=THR_CSV, threshold=None, configs=None):
+        keep_work=False, weights=None, thresholds=THR_CSV, threshold=None, configs=None,
+        backend="torch"):
     """Run the ensemble over a folder of tracking parquets and write bouts/frames into `out`.
 
     jobs      job-sheet path, or the dict parse_jobs() returns, or None for every head
@@ -229,9 +230,13 @@ def run(folder, jobs=None, labs=None, actions=None, subject="*", target="*",
     thresholds  CSV of '<lab>__<action>,threshold' rows (default derived_thresholds_train.csv)
     threshold   one constant threshold for every head, overriding `thresholds`
     configs   run only these ensemble configs (default: all 5) -- faster, lower quality
+    backend   'torch' (default) or 'jax' (the original implementation). The two agree to
+              float32 round-off; see docs/pytorch-port.md for the measured numbers.
 
     Returns the list of written output stems.
     """
+    if backend not in ("torch", "jax"):
+        sys.exit(f"ERROR: unknown backend {backend!r}; choose 'torch' or 'jax'")
     if isinstance(jobs, str):
         jobs = parse_jobs(jobs)
     if jobs is None and (labs or actions or subject != "*" or target != "*"):
@@ -282,7 +287,8 @@ def run(folder, jobs=None, labs=None, actions=None, subject="*", target="*",
     env = dict(os.environ, SNIFFALL="1", PREDICT_BATCH="64", XLA_FLAGS="--xla_gpu_autotune_level=0",
                XLA_PYTHON_CLIENT_PREALLOCATE="false",
                CUDA_VISIBLE_DEVICES=str(gpu), CUSTOM_DIR=ds, CUSTOM_CSV="manifest.csv",
-               CUSTOM_MODE="custom", CUSTOM_OUT=outstore, PERLAB_WORKDIR=f"/dev/shm/doom_predict_{os.getpid()}")
+               CUSTOM_MODE="custom", CUSTOM_OUT=outstore, HIDRA_BACKEND=backend,
+               PERLAB_WORKDIR=f"/dev/shm/doom_predict_{os.getpid()}")
     if weights:
         env["HIDRA_PERLAB_CKPT"] = os.path.abspath(weights)   # resolved here, before the subprocess
         print(f"using fine-tuned per-lab weights: {weights}")
@@ -295,7 +301,8 @@ def run(folder, jobs=None, labs=None, actions=None, subject="*", target="*",
     for i, lab in enumerate(run_labs, 1):
         print(f"[{i}/{len(run_labs)}] inferring {lab} ...", flush=True)
         r = subprocess.run([sys.executable, "-m", "hidra.run_allbehaviors_perlab",
-                            "--dataset", "custom", "--embedding-lab", lab, "--epochs", "1"], env=env)
+                            "--dataset", "custom", "--embedding-lab", lab, "--epochs", "1",
+                            "--backend", backend], env=env)
         if r.returncode != 0:
             print(f"  WARNING: {lab} inference exited {r.returncode}; skipping its outputs")
     shutil.rmtree(env["PERLAB_WORKDIR"], ignore_errors=True)
@@ -369,6 +376,9 @@ def main():
     ap.add_argument("--threshold", type=float, help="one constant threshold for every head (overrides --thresholds)")
     ap.add_argument("--configs", help=f"run only these ensemble configs (default all 5: "
                                       f"{','.join(ALL_CONFIGS)}); faster, lower quality, for iterating")
+    ap.add_argument("--backend", default="torch", choices=["torch", "jax"],
+                    help="model backend: torch (default) or jax (the original). They agree to "
+                         "float32 round-off; jax additionally needs the [jax] extra installed")
     ap.add_argument("--keep-work", action="store_true", help="keep the scratch inference dir")
     args = ap.parse_args()
 
@@ -387,6 +397,7 @@ def main():
         subject=args.subject, target=args.target, out=args.out, pix_per_cm=args.pix_per_cm,
         fps=args.fps, gpu=args.gpu, output=args.output, keep_work=args.keep_work,
         weights=args.weights, thresholds=args.thresholds, threshold=args.threshold,
+        backend=args.backend,
         configs=[c.strip() for c in args.configs.split(",") if c.strip()] if args.configs else None)
 
 

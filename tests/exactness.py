@@ -103,7 +103,9 @@ def ref_lstm(v, x, hidden_dim, batch_dims=()):
     """`solution.LSTM.apply` in float64: learned initial state, gates ordered i/f/c/o."""
     x = np.asarray(x, np.float64)
     tsteps, bs = x.shape[0], x.shape[1]
-    sig = lambda z: 1.0 / (1.0 + np.exp(-z))
+
+    def sig(z):
+        return 1.0 / (1.0 + np.exp(-z))
 
     h = np.tanh(np.asarray(v["h0"]["c"], np.float64))
     c = np.asarray(v["c0"]["c"], np.float64)

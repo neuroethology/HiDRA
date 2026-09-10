@@ -16,7 +16,7 @@ is what makes bit-level comparison against the reference possible.
     probs = head.predict(batch)          # (B, seq_len, len(ACTIONS))
 """
 from .checkpoint import load_jax_checkpoint, read_state, save_state
-from .layers import BidirectionalLSTM, Constant, Embedding, Linear, LSTM
+from .layers import LSTM, BidirectionalLSTM, Constant, Embedding, Linear
 from .models import MultiTaskPerLabModel, UnsupervisedModel, load_perlab, load_unsupervised
 
 __all__ = [

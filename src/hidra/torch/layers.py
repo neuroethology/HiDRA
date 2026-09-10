@@ -36,6 +36,25 @@ STAGE_INIT = "init"
 STAGE_TRAIN = "train"
 
 
+def jax_gather_index(indices, size):
+    """Normalize gather indices the way JAX does, so out-of-range values do not crash.
+
+    This is not defensive padding -- it is required for equivalence. `solution.batch` pads
+    a short final batch with `np.empty_like`, i.e. *uninitialized memory*, and flags those
+    rows with `batch_mask=0`. So `batch["lab_id"]` legitimately contains garbage (observed:
+    1072902963) in the padding rows. JAX's gather clamps such indices into range and
+    happily produces a value that `Predictions.update` then discards; PyTorch instead
+    raises a device-side assert and takes the whole run down.
+
+    JAX's rule, verified against jnp: negative indices wrap once by adding `size`, then
+    everything is clamped to [0, size-1]. Matching it means the padding rows carry the same
+    values on both backends, so a full-tensor comparison stays clean.
+    """
+    indices = indices.long()
+    indices = torch.where(indices < 0, indices + size, indices)
+    return indices.clamp_(0, size - 1)
+
+
 class HidraModule(nn.Module):
     """Base class carrying the `stage` context the JAX `set_context` mechanism provided."""
 
@@ -163,7 +182,7 @@ class Embedding(HidraModule):
                                           dtype=torch.float32, device=device))
 
     def forward(self, indices):
-        return self.w.to(self.compute_dtype)[indices.long()]
+        return self.w.to(self.compute_dtype)[jax_gather_index(indices, self.cardinality)]
 
     def extra_repr(self):
         return f"cardinality={self.cardinality}, dim={self.input_dim}"
