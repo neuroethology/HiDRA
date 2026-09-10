@@ -106,7 +106,7 @@ rear = hidra.ethogram("results/", action="rear")      # filtered + sorted
 ## 5. Thresholds
 
 A call is `prob >= threshold`. The bundled thresholds in
-[`derived_thresholds_train.csv`](../derived_thresholds_train.csv) are per-(lab, action) and were
+[`derived_thresholds_train.csv`](../src/hidra/assets/derived_thresholds_train.csv) are per-(lab, action) and were
 calibrated on training data (leakage-free), falling back to a pooled per-action value and then to
 0.30 for anything missing. They are a reasonable default on the labs' own footage — they are not
 tuned to yours.

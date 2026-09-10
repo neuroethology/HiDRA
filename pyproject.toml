@@ -26,6 +26,11 @@ dependencies = [
 
 [project.optional-dependencies]
 # PyTorch inference/training backend (the default going forward).
+#
+# NOTE: this extra is not yet self-sufficient. The ported *model* needs no JAX, but the numpy
+# data pipeline it shares with the original still lives in solution.py, which imports JAX at
+# module scope -- so running inference or fine-tuning today also needs the `jax` extra.
+# Install both: `uv sync --extra jax --extra torch`. See docs/pytorch-port.md.
 torch = ["torch>=2.6", "safetensors>=0.4"]
 # The original JAX backend. Needed to reproduce reference outputs and to run the
 # exactness tests that compare the two backends.

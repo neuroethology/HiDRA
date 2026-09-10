@@ -218,3 +218,44 @@ print("OK")
     out = subprocess.run([sys.executable, "-c", script], capture_output=True, text=True,
                          timeout=1200, cwd=str(REPO))
     assert out.returncode == 0, f"stdout={out.stdout[-2000:]}\nstderr={out.stderr[-3000:]}"
+
+
+@pytest.mark.jax
+@requires_jax
+def test_full_ensemble_agrees(track_dir, tmp_path_factory, stems):
+    """All five configs, the way a user actually runs it.
+
+    The single-config tests above isolate one model; this exercises the real deliverable --
+    five checkpoints averaged through `Predictions`, then thresholded into bouts. It is also
+    the only test that covers the 4-, 6- and 7-bodypart configs end to end, where a shape
+    assumption in the port would surface.
+    """
+    outs = {}
+    for backend in ("jax", "torch"):
+        out = tmp_path_factory.mktemp(f"full_{backend}")
+        _run_cli(track_dir, out, backend, configs=",".join(
+            ["11fps_4bp", "15fps_5bp", "19fps_6bp", "23fps_7bp", "27fps_6bp"]))
+        outs[backend] = out
+
+    key = ["subject", "target", "lab", "action", "frame"]
+    cols = ["subject", "target", "lab", "action", "start_frame", "stop_frame", "n_frames"]
+    total, worst = 0, 0.0
+    for stem in stems:
+        a = pd.read_parquet(outs["jax"] / f"{stem}.frames.parquet").sort_values(key, ignore_index=True)
+        b = pd.read_parquet(outs["torch"] / f"{stem}.frames.parquet").sort_values(key, ignore_index=True)
+        assert len(a) == len(b) > 0
+        pa, pb = a.prob.to_numpy(np.float64), b.prob.to_numpy(np.float64)
+        worst = max(worst, float(np.abs(pa - pb).max()))
+        total += len(a)
+        assert (a.call.to_numpy() == b.call.to_numpy()).all(), f"{stem}: calls differ"
+        assert np.corrcoef(pa, pb)[0, 1] > MIN_CORR
+
+        ba = pd.read_csv(outs["jax"] / f"{stem}.bouts.csv")
+        bb = pd.read_csv(outs["torch"] / f"{stem}.bouts.csv")
+        assert len(ba) == len(bb), f"{stem}: {len(ba)} vs {len(bb)} bouts"
+        if len(ba):
+            pd.testing.assert_frame_equal(ba.sort_values(cols, ignore_index=True)[cols],
+                                          bb.sort_values(cols, ignore_index=True)[cols])
+    assert worst < TOL_PROB
+    print(f"\nfull 5-config ensemble: {total} frame-rows, all calls and bouts identical, "
+          f"worst probability difference {worst:.2e}")

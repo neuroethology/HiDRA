@@ -16,6 +16,25 @@ import os
 import numpy as np
 import torch
 
+_NO_JAX_HINT = (
+    "The PyTorch backend still needs the JAX runtime installed, because the numpy data "
+    "pipeline (solution.Dataset / solution.Predictions) lives in a module that imports JAX "
+    "at import time. The model itself does not use JAX.\n"
+    "  Install it:  uv sync --extra jax --extra torch    (or: pip install 'hidra[jax,torch]')\n"
+    "See docs/pytorch-port.md, 'What is left before JAX can be dropped'."
+)
+
+
+def _solution():
+    """`hidra.solution`, with an actionable message when JAX is absent."""
+    try:
+        from .. import solution
+    except ModuleNotFoundError as exc:  # pragma: no cover - depends on the install
+        if exc.name and exc.name.split(".")[0] == "jax":
+            raise ModuleNotFoundError(_NO_JAX_HINT) from exc
+        raise
+    return solution
+
 # Batch keys the model consumes, and the dtype each must arrive in.
 _MODEL_INPUTS = {
     "agent": torch.float32,
@@ -37,7 +56,7 @@ def make_dataset(config, videos, num_epochs=1, seed=None):
     inference averages several augmented passes per video, so the augmentation
     distribution is part of the model's definition, not a training-time detail.
     """
-    from .. import solution
+    solution = _solution()
 
     return solution.Dataset(
         videos=videos,
@@ -77,9 +96,7 @@ def iter_batches(dataset, batch_size):
     `Predictions.update` then skips. Reusing it keeps the element-to-batch assignment --
     and therefore the padding behaviour -- identical across backends.
     """
-    from .. import solution
-
-    yield from solution.batch(dataset.element_iterator(), batch_size)
+    yield from _solution().batch(dataset.element_iterator(), batch_size)
 
 
 @torch.no_grad()
