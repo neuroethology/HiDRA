@@ -292,8 +292,9 @@ def cmd_train(args):
     if args.eval_interval:
         env["LABTAIL_EVAL_INTERVAL"] = str(args.eval_interval)
 
-    print(f"fine-tuning {args.lab} {actions} (mode={args.mode}, steps={args.steps}, lr={args.lr}) "
-          f"on {n_train} video(s)\n  -> {out}/{{config}}__{tag}.pkl")
+    print(f"fine-tuning {args.lab} {actions} (mode={args.mode}, steps={args.steps}, lr={args.lr}, "
+          f"backend={getattr(args, 'backend', 'torch')}) on {n_train} video(s)"
+          f"\n  -> {out}/{{config}}__{tag}.pkl")
     if args.mode == "tail":
         print("  note: mode=tail retrains the per-lab tail, which is SHARED across labs -- in the "
               f"resulting checkpoint only {args.lab} is meaningful, so always predict with "
@@ -305,7 +306,9 @@ def cmd_train(args):
             print(f"[{i}/{len(configs)}] {cfg}: {dest} exists, skipping (--overwrite to redo)")
             done.append(cfg); continue
         print(f"[{i}/{len(configs)}] training {cfg} ...", flush=True)
-        cmd = [sys.executable, "-m", "hidra.train_perlab_heads", "--config", cfg]
+        module = ("hidra.torch.train_perlab" if getattr(args, "backend", "torch") == "torch"
+                  else "hidra.train_perlab_heads")
+        cmd = [sys.executable, "-m", module, "--config", cfg]
         if args.smoke:
             cmd.append("--smoke")
         r = subprocess.run(cmd, env=env)
@@ -495,6 +498,9 @@ def main():
     p.add_argument("--overwrite", action="store_true", help="retrain configs whose checkpoint already exists")
     p.add_argument("--smoke", action="store_true", help="600-step dry run, writes no checkpoint")
     p.add_argument("--thresholds", help="thresholds CSV defining the available heads (default: bundled)")
+    p.add_argument("--backend", default="torch", choices=["torch", "jax"],
+                   help="training backend: torch (default) or jax (the original). Both write the "
+                        "checkpoint in the same layout, so predict.py --weights loads either one")
     p.set_defaults(func=cmd_train)
 
     p = sub.add_parser("calibrate", help="pick best-F1 thresholds from predictions + annotations",

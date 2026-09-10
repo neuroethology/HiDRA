@@ -22,6 +22,7 @@ import time
 import pandas as pd
 
 import jax
+import jax.numpy as jnp
 
 from . import paths, solution
 from .train_perlab_heads import MultiTaskPerLabModel
@@ -57,6 +58,12 @@ def predict_into(config, predictions, num_epochs, dtype):
         unsupervised_model=(um, upath))
     sm.set_context({"stage": "eval"})
     weights = pickle.load(open(perlab_ckpt_path(config["name"]), "rb"))
+    # Force every leaf onto the device as a JAX array. The *published* checkpoints already
+    # unpickle that way (jax's own _reconstruct_array device_puts them), but a checkpoint
+    # written by any other tool -- notably a fine-tune produced by the PyTorch backend --
+    # holds plain numpy arrays, and then `Embedding.apply`'s `weights["w"][indices]` hands a
+    # traced index to numpy and dies with TracerArrayConversionError inside jit.
+    weights = jax.tree.map(jnp.asarray, weights)
     sm = sm.set_variables(weights)
 
     @jax.jit

@@ -275,7 +275,12 @@ class MultiTaskPerLabModel(HidraModule):
         x = x.permute(1, 0, 2)
         # Drop the context padding the trunk needed but the labels do not cover.
         x = x[:, self.padding: x.shape[1] - self.padding]
-        return x.float()
+        # The original ends `_trunk_feats` with `.astype("float32")`, which exists because
+        # training ran the trunk in bfloat16 and the head plus loss want float32. Promoting
+        # instead of hard-casting keeps that meaning (bfloat16/float32 -> float32) while
+        # letting a deliberate float64 run stay in float64 -- without which a float64
+        # finite-difference reference is capped at float32 precision and useless.
+        return x.to(torch.promote_types(torch.float32, x.dtype))
 
     def logits_perlab(self, batch):
         """Raw per-(lab, action) head logits -> (batch, seq_len, n_heads)."""
@@ -290,7 +295,11 @@ class MultiTaskPerLabModel(HidraModule):
         probs = torch.sigmoid(self.logits_perlab(batch))
         # Same clamping gather as the lab embedding: padding rows carry garbage lab ids.
         Pb = self.P[jax_gather_index(batch["lab_id"], self.P.shape[0])]
-        return torch.einsum("btj,baj->bta", probs, Pb)
+        # jnp promotes a bfloat16-by-float32 einsum to float32; torch raises instead. In a
+        # bfloat16 training run `probs` is bfloat16 while P is always float32, so promote
+        # explicitly to keep the result -- and its dtype -- the same as the JAX path's.
+        out_dtype = torch.promote_types(probs.dtype, Pb.dtype)
+        return torch.einsum("btj,baj->bta", probs.to(out_dtype), Pb.to(out_dtype))
 
 
 # ------------------------------------------------------------------ checkpoint loading
@@ -396,6 +405,12 @@ def load_unsupervised(config_name, path=None, dtype=torch.float32, device=None, 
         path = st if st.is_file() else base / f"{config_name}_unsupervised.pkl"
     model = build_unsupervised(config, dtype=dtype, device=device).to(device)
     report = load_state_into(model, _read_checkpoint(path))
+    # Layers store parameters in float32 and cast to the compute dtype in the forward,
+    # mirroring how the JAX code keeps float32 variables and casts in get_weights. For a
+    # float64 reference run that is not enough -- perturbing a float32 parameter quantizes
+    # the step and wrecks a finite-difference check -- so widen the storage to match.
+    if dtype in (torch.float64,):
+        model.to(dtype)
     model.load_report = report
     model.set_stage(STAGE_EVAL).eval()
     for p in model.parameters():
@@ -434,6 +449,8 @@ def load_perlab(config_name, unsupervised_model=None, path=None, dtype=torch.flo
                          n_actions=len(schema.ACTIONS), n_labs=len(schema.LABS),
                          dtype=dtype, device=device).to(device)
     report = load_state_into(model, _read_checkpoint(path))
+    if dtype in (torch.float64,):
+        model.to(dtype)
     model.load_report = report
     model.lab_action = lab_action
     model.set_P(schema.build_P(lab_action))
