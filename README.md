@@ -12,20 +12,43 @@ Two ways to use it:
 - **[Fine-tuning](docs/fine-tuning.md)** — you have some annotations. Adapt the head you picked to
   your arena, pose rig and annotation style, then re-calibrate its threshold: `finetune.py`.
 
-There is also a small Python API in [`hidra.py`](hidra.py) for notebook use.
+There is also a small Python API in [`src/hidra/__init__.py`](src/hidra/__init__.py)
+for notebook use: `import hidra`.
 
 ## Setup
 
-Python 3.12 + an NVIDIA GPU (driver ≥ 525). Install the deps with the bundled `requirements.txt`:
+Python 3.12+ and an NVIDIA GPU (driver ≥ 525). HiDRA is a normal Python package; install it
+with [uv](https://docs.astral.sh/uv/):
 
 ```bash
-python3.12 -m venv hidra-env
-source hidra-env/bin/activate
-pip install -r requirements.txt        # JAX(cuda12) + numpy + pandas + pyarrow + huggingface_hub
+uv sync --extra torch          # in a checkout: creates .venv
 ```
 
-The `jax[cuda12]` extra ships its own CUDA wheels, so no system CUDA toolkit is needed. CPU-only works
-but is much slower (see the note in `requirements.txt`).
+or into an existing environment:
+
+```bash
+pip install 'hidra[torch] @ git+https://github.com/talmolab/HiDRA'
+```
+
+That gives you the `hidra-predict`, `hidra-finetune` and `hidra-download-models` commands, an
+importable `hidra` package, and the root-level `predict.py` / `finetune.py` scripts if you
+prefer to run them in place. The torch wheels ship their own CUDA runtime, so no system CUDA
+toolkit is needed. CPU-only works but is much slower.
+
+### Backends
+
+The models were originally written in JAX and have been ported to PyTorch, which is now the
+default. The two agree to float32 round-off — every thresholded call and bout boundary is
+identical — and the PyTorch path is about 8× faster and uses less than half the memory. Full
+numbers, and how the equivalence was established: **[docs/pytorch-port.md](docs/pytorch-port.md)**.
+
+```bash
+python predict.py tracking/ --out results/ --pix-per-cm 16 --fps 30                  # torch
+python predict.py tracking/ --out results/ --pix-per-cm 16 --fps 30 --backend jax    # original
+```
+
+`--backend jax` needs the original backend too — `uv sync --extra jax --extra torch`, which is
+also what the equivalence tests require. The default PyTorch path needs no JAX at all.
 
 ### Model weights
 
@@ -48,7 +71,16 @@ python download_models.py --revision v1.0          # pin a branch, tag, or commi
 ```
 
 `--repo` / `--revision` also read from `$HIDRA_HF_REPO` / `$HIDRA_HF_REVISION`. `predict.py`
-refuses to start with weights missing and points you back here.
+refuses to start with weights missing and points you back here. Set `$HIDRA_MODELS_DIR` to keep
+the weights somewhere other than `models/`.
+
+Optionally convert them to safetensors, which loads without a pickle and without JAX:
+
+```bash
+hidra-convert-weights            # writes {config}_*.safetensors alongside the .pkl files
+```
+
+The PyTorch backend picks up the `.safetensors` files automatically when they exist.
 
 ## Input
 
@@ -87,8 +119,8 @@ scale silently makes *all* predictions zero, so the tool refuses to run without 
 ## Usage
 
 ```bash
-# activate the environment created in Setup (or use any interpreter with requirements.txt installed)
-source hidra-env/bin/activate
+# activate the environment created in Setup (uv sync writes .venv/)
+source .venv/bin/activate
 
 # What can I run? 82 (lab, behaviour) heads across 15 labs:
 python predict.py --list-heads
@@ -166,6 +198,7 @@ to a pooled value then 0.30.
 --thresholds FILE  thresholds CSV (default: derived_thresholds_train.csv)
 --threshold P      one constant threshold for every head
 --configs C1,C2    run only these ensemble configs (default all 5; faster, lower quality)
+--backend B        torch (default) | jax -- model backend, see docs/pytorch-port.md
 --keep-work        keep the scratch inference directory
 ```
 
@@ -176,6 +209,9 @@ python finetune.py prepare  --tracking parquets/ --annotations bouts.csv --lab G
 python finetune.py train    --data ft_data/ --lab GroovyShrew --actions rear --out ft_models/ --tag myrig
 python finetune.py calibrate --frames ft_preds/ --annotations heldout_bouts.csv --out ft_thresholds.csv
 ```
+
+`train` takes `--backend {torch,jax}` too (default `torch`); either writes the checkpoint in the
+same layout, so `predict.py --weights` loads it on either backend.
 
 `prepare` stages your parquets plus a bout CSV into the layout the trainer reads, `train`
 warm-starts the adopted lab's head from the published checkpoint and adapts it to your data (5
@@ -189,21 +225,37 @@ Full walkthrough and caveats: **[docs/fine-tuning.md](docs/fine-tuning.md)**.
 - Runs one full 5-config forward pass **per lab** (each lab has its own trunk embedding), so "all
   labs" = 15 passes — a few minutes per folder. Restrict via the job sheet to speed up.
 - `video_id`s are derived from filenames; keep filenames unique within a folder.
-- The tool sets `SNIFFALL=1`, `XLA_FLAGS=--xla_gpu_autotune_level=0` (6-bodypart configs hang
-  otherwise), `PREDICT_BATCH=64` (long-video memory), and `XLA_PYTHON_CLIENT_PREALLOCATE=false`
-  automatically.
+- The tool sets `SNIFFALL=1` and `PREDICT_BATCH=64` (long-video memory) automatically, plus
+  `XLA_FLAGS=--xla_gpu_autotune_level=0` (6-bodypart configs hang otherwise) and
+  `XLA_PYTHON_CLIENT_PREALLOCATE=false`, which only matter to `--backend jax`.
+- Annotations for fine-tuning should cover **at least two mice**. The trainer pairs each
+  annotated agent with a target, and a video annotating only one mouse leaves it with no
+  target to choose (it fails inside numpy with `a cannot be empty unless no samples are taken`).
 
 ## Contents
 
 ```
-predict.py                       # inference (zero-shot or with fine-tuned weights)
-finetune.py                      # prepare / train / calibrate on your own annotations
-hidra.py                         # Python API over predict.py + the outputs
-docs/zero-shot.md docs/fine-tuning.md
-solution.py train_perlab_heads.py pm_rule.py
-run_test_probs_perlab.py run_allbehaviors_perlab.py   # inference engine
-derived_thresholds_train.csv     # per-(lab,action) thresholds (incl. sniffall)
-download_models.py               # fetch the weights from Hugging Face into models/
+pyproject.toml                   # the package (uv sync / pip install)
+predict.py finetune.py download_models.py    # thin shims -> the hidra package
+
+src/hidra/
+  __init__.py                    # the Python API (hidra.heads/predict/bouts/...)
+  cli.py                         # `predict.py`: inference, zero-shot or fine-tuned
+  finetune.py                    # prepare / train / calibrate on your own annotations
+  schema.py                      # label vocabularies, ensemble configs, head table
+  paths.py                       # where weights/thresholds/scratch live
+  solution.py train_perlab_heads.py pm_rule.py          # JAX models + data pipeline
+  run_test_probs_perlab.py run_allbehaviors_perlab.py   # inference engine
+  torch/                         # the PyTorch backend (default)
+    layers.py models.py          #   ported model
+    checkpoint.py convert.py     #   read JAX pickles without JAX; write safetensors
+    infer.py                     #   inference loop
+    train.py train_perlab.py     #   optimizer/EMA/loop + fine-tuning driver
+  assets/derived_thresholds_train.csv    # per-(lab,action) thresholds (incl. sniffall)
+
+reference/                       # the pre-port JAX implementation, byte-identical, runnable
+tests/                           # JAX-vs-PyTorch exactness suite
+docs/zero-shot.md docs/fine-tuning.md docs/pytorch-port.md
 models/                          # 5x backbone + 5x per-lab head + thresholds.pkl (~660 MB,
                                  #   NOT in git -- see "Model weights" above)
 ```

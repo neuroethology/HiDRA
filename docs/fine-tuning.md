@@ -22,6 +22,10 @@ arena produces. If it is only the decision threshold that is wrong, go straight 
   your data by that lab name. Pick the lab whose zero-shot calls were closest.
 - **One behaviour per (subject, target) per frame.** Labels are stored as one action id per pair
   per frame, so overlapping bouts of different behaviours on the same pair overwrite each other.
+- **Annotate at least two mice.** The trainer forms an (agent, target) pair for every
+  annotated agent, and for an agent with no cross-directed labels it picks a target at random
+  from the *other* mice present. A video that annotates only one mouse leaves nothing to pick
+  from and the run dies inside numpy (`a cannot be empty unless no samples are taken`).
 - **Un-annotated frames are negatives.** For each (agent, target, action) a video annotates,
   every frame outside a bout is a negative example for that combination. Annotate each behaviour
   exhaustively within a video, and leave out videos you only skimmed. Combinations a video does
@@ -33,7 +37,8 @@ arena produces. If it is only the decision threshold that is wrong, go straight 
 
 ## 0. Set up
 
-Weights (`python download_models.py`), the `requirements.txt` environment, and one GPU. Training
+Weights (`python download_models.py`), an environment from `uv sync --extra torch`, and one
+GPU. Training
 writes its scratch cache to `/dev/shm`, so this is a Linux-with-a-GPU workflow — unlike inference,
 it is not something to try on a laptop.
 
@@ -172,7 +177,7 @@ python predict.py /path/to/new_videos \
 
 Quote the `--weights` template so the shell leaves `{config}` alone; HiDRA fills it in with the
 name of each config it runs. Everything else about the output is identical to zero-shot — same
-`bouts.csv`, same `frames.parquet`, same [`hidra`](../hidra.py) helpers.
+`bouts.csv`, same `frames.parquet`, same [`hidra`](../src/hidra/__init__.py) helpers.
 
 ## What is actually happening
 
@@ -180,7 +185,9 @@ Per config, the model is: frozen SSL forecaster → frozen feature merge → `x0
 lab-embedding → 3 × (BiLSTM + FFN) tail → a 90-column linear head, one column per (lab, action).
 Inference reads the columns belonging to the lab you request.
 
-Fine-tuning (the `LABTAIL` path in [`train_perlab_heads.py`](../train_perlab_heads.py)) warm-starts
+Fine-tuning (the `LABTAIL` path in
+[`hidra/torch/train_perlab.py`](../src/hidra/torch/train_perlab.py), or
+[`train_perlab_heads.py`](../src/hidra/train_perlab_heads.py) with `--backend jax`) warm-starts
 every layer from the canonical checkpoint, freezes the SSL backbone and the merge, and trains the
 subset `--mode` selects. The loss is masked to the head columns you named, so the gradient is not
 diluted across the other 89. `finetune.py` is a wrapper that sets that environment up, runs the

@@ -1,0 +1,102 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "hidra"
+version = "0.1.0"
+description = "HiDRA -- the High-Dimensional Rodent Annotator: per-lab-head mouse behaviour classifier ensemble"
+readme = "README.md"
+requires-python = ">=3.12"
+license = { text = "BSD-3-Clause" }
+authors = [{ name = "Talmo Lab", email = "talmo@salk.edu" }]
+keywords = ["behavior", "pose", "ethology", "neuroscience", "mice"]
+classifiers = [
+    "Intended Audience :: Science/Research",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Bio-Informatics",
+]
+
+dependencies = [
+    "numpy>=2.1",
+    "pandas>=2.2",
+    "pyarrow>=17",
+    "huggingface-hub>=0.34",
+]
+
+[project.optional-dependencies]
+# PyTorch inference/training backend, and the default. Self-sufficient: inference and
+# fine-tuning run with no JAX installed.
+torch = ["torch>=2.6", "safetensors>=0.4"]
+# The original JAX backend. Only needed to run `--backend jax`, and to run the exactness
+# tests that compare the two backends against each other.
+#
+# numpy<2.5 is a hard requirement of the *reference* code, not of JAX: numpy 2.5 stopped
+# accepting nested sequences in np.random.SeedSequence, and reference/solution.py seeds its
+# epoch shuffle with `default_rng([epoch_idx, dataset.seed])` where dataset.seed is itself a
+# list. The port fixes that by flattening the seed (bit-identical stream -- see
+# tests/test_seed_flattening.py), but the pristine reference cannot be edited.
+jax = ["jax[cuda12]==0.9.2", "numpy<2.5"]
+
+[dependency-groups]
+dev = [
+    "pytest>=8",
+    "pytest-xdist>=3.6",
+    "ruff>=0.6",
+]
+
+[project.scripts]
+hidra-predict = "hidra.cli:main"
+hidra-finetune = "hidra.finetune:main"
+hidra-download-models = "hidra.download_models:main"
+hidra-convert-weights = "hidra.torch.convert:main"
+
+[project.urls]
+Homepage = "https://github.com/talmolab/HiDRA"
+Weights = "https://huggingface.co/talmolab/HiDRA"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/hidra"]
+
+[tool.hatch.build.targets.sdist]
+include = ["src/hidra", "docs", "tests", "README.md"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "gpu: requires a CUDA device",
+    "jax: requires the JAX backend installed",
+    "slow: full-ensemble / end-to-end runs",
+]
+
+[tool.ruff]
+line-length = 110
+target-version = "py312"
+# reference/ is a frozen copy of the pre-port originals (see reference/README.md); linting
+# it would only invite edits, and tests/test_reference_pristine.py forbids those.
+extend-exclude = ["reference"]
+
+[tool.ruff.lint]
+# Pinned explicitly rather than relying on ruff's default set, which widens between
+# releases and would make CI results depend on the ruff version.
+select = ["E4", "E7", "E9", "F", "I", "B", "UP"]
+# `l` as a loop variable is used throughout the model code for the layer index, matching
+# the paper-ish notation in the original.
+ignore = ["E741"]
+
+[tool.ruff.lint.per-file-ignores]
+# These modules came over from reference/ and are kept line-for-line diffable against it --
+# that correspondence is what makes the port reviewable and the exactness argument
+# checkable. Restyling them would destroy it, so only the rules that catch real breakage
+# (F: undefined/unused names, E9: syntax) apply.
+# solution.py additionally: `batch` is a parameter name throughout the reference code, and
+# the module deliberately re-exports data.batch for back-compat, so F811 fires on every
+# method signature.
+"src/hidra/solution.py" = ["E4", "E7", "I", "B", "UP", "F811"]
+"src/hidra/data.py" = ["E4", "E7", "I", "B", "UP"]
+"src/hidra/schema.py" = ["E4", "E7", "I", "B", "UP"]
+"src/hidra/train_perlab_heads.py" = ["E4", "E7", "I", "B", "UP"]
+"src/hidra/run_allbehaviors_perlab.py" = ["E4", "E7", "I", "B", "UP"]
+"src/hidra/run_test_probs_perlab.py" = ["E4", "E7", "I", "B", "UP"]
+"src/hidra/cli.py" = ["E4", "E7", "I", "B", "UP"]
+"src/hidra/finetune.py" = ["E4", "E7", "I", "B", "UP"]
