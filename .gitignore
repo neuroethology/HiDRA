@@ -1,5 +1,7 @@
 # Model weights — hosted on Hugging Face, fetched with download_models.py
 models/*.pkl
+models/*.safetensors
+models/.cache/
 
 # Local metadata (metadata.csv.example is the tracked template)
 metadata.csv
@@ -23,6 +25,8 @@ experiments/
 
 # Python
 __pycache__/
+.pytest_cache/
+.ruff_cache/
 *.py[cod]
 *.egg-info/
 .eggs/

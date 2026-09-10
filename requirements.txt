@@ -1,20 +1,14 @@
-# HiDRA — Python environment (tested with Python 3.12.3)
+# Legacy pip install path, kept so `pip install -r requirements.txt` keeps working.
 #
-# GPU (recommended). Needs an NVIDIA GPU + driver >= 525 (CUDA 12+); tested on driver 580.
-#   python3.12 -m venv hidra-env
-#   source hidra-env/bin/activate
-#   pip install -r requirements.txt
+# The supported install is uv against pyproject.toml:
+#   uv sync --extra torch                 # PyTorch backend (the default going forward)
+#   uv sync --extra jax --extra torch     # + the JAX reference backend, needed by the
+#                                         #   exactness tests in tests/
 #
-# CPU-only (works but MUCH slower): replace the jax line below with plain
-#   jax==0.9.2
+# Extras, if you are driving pip directly:
+#   pip install -e '.[torch]'
+#   pip install -e '.[jax,torch]'
 #
-# The jax[cuda12] extra pulls the matching jaxlib + CUDA-12 plugin + NVIDIA cuda wheels,
-# so no system-wide CUDA toolkit install is required.
-
-jax[cuda12]==0.9.2
-numpy==2.4.3
-pandas==3.0.1
-pyarrow==23.0.1
-
-# Weight download from the Hugging Face Hub (python download_models.py).
-huggingface_hub==1.30.0
+# Note the JAX extra pins numpy<2.5: the pristine reference implementation under reference/
+# relies on numpy accepting nested np.random.SeedSequence input, which numpy 2.5 removed.
+-e .[torch]
