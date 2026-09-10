@@ -20,145 +20,23 @@ import pandas as pd
 from . import paths
 
 
-class Enum:
-    def __init__(self, *values):
-        self.values = list(values)
-        self.value_to_idx = {value: idx for idx, value in enumerate(self.values)}
-
-    def encode(self, value):
-        return self.value_to_idx[value]
-
-    def decode(self, idx):
-        return self.values[idx]
-
-    def __len__(self):
-        return len(self.values)
-
-
-MOUSE_IDS = Enum(1, 2, 3, 4)
-
-
-def parse_mouse_id(m):
-    """Convert 'mouse1' -> 1, or pass through if already int. 'self' passes through."""
-    if isinstance(m, str) and m.startswith("mouse"):
-        return int(m.replace("mouse", ""))
-    return m
-
-
-BODYPARTS = Enum(
-    "tail_base",
-    "ear_right",
-    "ear_left",
-    "nose",
-    "neck",
-    "body_center",
-    "tail_tip",
-    "tail_midpoint",
-    "forepaw_left",
-    "forepaw_right",
-    "hindpaw_left",
-    "hindpaw_right",
-    "hip_right",
-    "hip_left",
-    "lateral_right",
-    "lateral_left",
-    "head",
-    "spine_1",
-    "spine_2",
-    "tail_middle_1",
-    "tail_middle_2",
-    "headpiece_topfrontright",
-    "headpiece_topbackright",
-    "headpiece_topfrontleft",
-    "headpiece_topbackleft",
-    "headpiece_bottomfrontright",
-    "headpiece_bottombackright",
-    "headpiece_bottombackleft",
-    "headpiece_bottomfrontleft",
+# The label vocabularies live in schema.py, which is jax-free so the PyTorch backend can
+# import them too. Re-exported here (same objects, not copies) so every existing
+# `solution.ACTIONS` / `solution.LABS` reference keeps working and there is one vocabulary
+# per process -- important because SNIFFALL mutates ACTIONS at import time.
+from .schema import (  # noqa: F401
+    ACTIONS,
+    BODYPARTS,
+    Enum,
+    LABS,
+    MOUSE_IDS,
+    SELF_DIRECTED,
+    SNIFF_FAMILY,
+    SNIFFALL_LABS,
+    TRAIN_ONLY_LABS,
+    get_configs,
+    parse_mouse_id,
 )
-
-ACTIONS = Enum(
-    "none",
-    "sniff",
-    "sniffgenital",
-    "attack",
-    "rear",
-    "sniffbody",
-    "approach",
-    "sniffface",
-    "mount",
-    "escape",
-    "reciprocalsniff",
-    "defend",
-    "selfgroom",
-    "dig",
-    "climb",
-    "chase",
-    "intromit",
-    "avoid",
-    "dominancemount",
-    "dominance",
-    "huddle",
-    "disengage",
-    "follow",
-    "rest",
-    "attemptmount",
-    "shepherd",
-    "flinch",
-    "chaseattack",
-    "tussle",
-    "freeze",
-    "exploreobject",
-    "submit",
-    "run",
-    "dominancegroom",
-    "genitalgroom",
-    "allogroom",
-    "biteobject",
-    # "ejaculate",
-)
-
-# SNIFFALL experiment: a merged "sniff-family" behavior (sniff + all sniff subtypes).
-# Appended as a NEW action id (37) ONLY when env SNIFFALL is set, so default 37-action
-# runs/checkpoints are byte-for-byte unchanged. Its per-frame label is synthesized as
-# the OR of the sniff-family channels in MultiTaskPerLabModel._labels37 (train_perlab_heads.py);
-# routed to its own head + its own readout slot, so no existing action is corrupted.
-if os.environ.get("SNIFFALL"):
-    ACTIONS.values.append("sniffall")
-    ACTIONS.value_to_idx["sniffall"] = len(ACTIONS.values) - 1
-
-LABS = Enum(
-    "AdaptableSnail",
-    "BoisterousParrot",
-    "CRIM13",
-    "CalMS21_supplemental",
-    "CalMS21_task1",
-    "CalMS21_task2",
-    "CautiousGiraffe",
-    "DeliriousFly",
-    "ElegantMink",
-    "GroovyShrew",
-    "InvincibleJellyfish",
-    "JovialSwallow",
-    "LyricalHare",
-    "MABe22_keypoints",
-    "MABe22_movies",
-    "NiftyGoldfinch",
-    "PleasantMeerkat",
-    "ReflectiveManatee",
-    "SparklingTapir",
-    "TranquilPanther",
-    "UppityFerret",
-)
-
-TRAIN_ONLY_LABS = [
-    "CRIM13",
-    "CalMS21_supplemental",
-    "CalMS21_task1",
-    "CalMS21_task2",
-    "MABe22_keypoints",
-    "MABe22_movies",
-]
 
 
 class TrackingData:
@@ -2699,64 +2577,6 @@ def predict(config, predictions=None, is_val=False):
         os.makedirs(persist_dir, exist_ok=True)
         pickle.dump(thresholds, open(f"{persist_dir}/{config['name']}_thresholds.pkl", "wb"))
         print(metrics)
-
-
-def get_configs():
-    global_seed = 123456789
-    configs = [
-        {
-            "name": "11fps_4bp",
-            "sample_rate": 11,
-            "num_bodyparts": 4,
-            "max_time_dilation": 1.8,
-            "max_scale": 1.6,
-            "noise_scale": 3.5,
-            "aggregation_radius": 125,
-        },
-        {
-            "name": "15fps_5bp",
-            "sample_rate": 15,
-            "num_bodyparts": 5,
-            "max_time_dilation": 2.0,
-            "max_scale": 2.0,
-            "noise_scale": 3.0,
-            "aggregation_radius": 150,
-        },
-        {
-            "name": "19fps_6bp",
-            "sample_rate": 19,
-            "num_bodyparts": 6,
-            "max_time_dilation": 1.7,
-            "max_scale": 1.5,
-            "noise_scale": 2.5,
-            "aggregation_radius": 175,
-        },
-        {
-            "name": "23fps_7bp",
-            "sample_rate": 23,
-            "num_bodyparts": 7,
-            "max_time_dilation": 1.5,
-            "max_scale": 1.7,
-            "noise_scale": 2.0,
-            "aggregation_radius": 100,
-        },
-        {
-            "name": "27fps_6bp",
-            "sample_rate": 27,
-            "num_bodyparts": 6,
-            "max_time_dilation": 1.4,
-            "max_scale": 1.9,
-            "noise_scale": 1.5,
-            "aggregation_radius": 125,
-        },
-    ]
-    for config_idx, config in enumerate(configs):
-        config["split_seed"] = [0, config_idx, global_seed]
-        config["pretrain_seed"] = [1, config_idx, global_seed]
-        config["train_seed"] = [2, config_idx, global_seed]
-        config["eval_seed"] = [3, config_idx, global_seed]
-
-    return {config["name"]: config for config in configs}
 
 
 def train_ensemble():
