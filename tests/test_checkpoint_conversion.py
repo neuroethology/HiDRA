@@ -153,3 +153,162 @@ def test_convert_one_verifies(tmp_path, config_name):
     src = paths.models_dir() / f"{config_name}_supervised_perlab_sniffall.pkl"
     out, n = convert_one(src, tmp_path / "ft.safetensors", verify=True)
     assert out.is_file() and n == 185
+
+
+def test_zero_dim_tensors_survive_a_roundtrip(tmp_path):
+    """0-d variables must keep their shape.
+
+    `np.ascontiguousarray` has ndmin=1 semantics and silently promotes a 0-d array to shape
+    (1,). Several checkpoint variables are 0-d -- `n` above all, the data-dependent-init
+    counter feeding `1 / (1 - decay**n)` -- so a stray leading axis there would broadcast
+    through the running statistics rather than failing loudly.
+    """
+    from hidra.checkpoints import load_flat_checkpoint, save_safetensors
+
+    tree = {
+        "layer": {
+            "n": np.float32(255.989),                 # 0-d, the shape that used to break
+            "w": np.arange(6, dtype=np.float32).reshape(2, 3),
+            "s": np.ones(3, dtype=np.float32),
+            "t": np.asarray(7.0, dtype=np.float32),   # 0-d ndarray, same case
+        }
+    }
+    path = save_safetensors(tmp_path / "zero_dim.safetensors", tree)
+    back = load_flat_checkpoint(path)
+    assert back["layer/n"].shape == (), f"0-d became {back['layer/n'].shape}"
+    assert back["layer/t"].shape == ()
+    assert back["layer/w"].shape == (2, 3)
+    assert back["layer/s"].shape == (3,)
+    assert float(back["layer/n"]) == pytest.approx(255.989, abs=1e-3)
+
+
+def test_non_contiguous_arrays_are_saved_correctly(tmp_path):
+    """A transposed view must be stored by value, not reinterpreted."""
+    from hidra.checkpoints import load_flat_checkpoint, save_safetensors
+
+    base = np.arange(12, dtype=np.float32).reshape(3, 4)
+    view = base.T                                      # non-contiguous
+    assert not view.flags["C_CONTIGUOUS"]
+    path = save_safetensors(tmp_path / "view.safetensors", {"v": view})
+    np.testing.assert_array_equal(load_flat_checkpoint(path)["v"], view)
+
+
+def test_thresholds_json_roundtrip(tmp_path, config_name):
+    """thresholds.json must reproduce the pickle exactly -- it is the last pickle in the
+    load path, and the values pick the decision thresholds."""
+    from hidra import paths
+    from hidra.checkpoints import load_thresholds, save_thresholds
+
+    original = load_thresholds(paths.models_dir() / "thresholds.pkl")
+    path = save_thresholds(tmp_path / "thresholds.json", original)
+    back = load_thresholds(path)
+    assert back == original, "thresholds changed through JSON"
+    assert set(back) == set(original) and len(back) == 80
+
+
+# ------------------------------------------------------------------ publishing
+
+def test_publish_plan_is_complete_and_safetensors_only(monkeypatch):
+    """`hidra-publish-weights` must offer a *complete* weight set and delete the pickles.
+
+    A partial publication is the dangerous case: inference averages all five configs and
+    loads a checkpoint for each, so a set missing one config fails at run time rather than
+    at publish time.
+    """
+    from hidra import paths, publish
+
+    models = paths.models_dir()
+    if not (models / "thresholds.json").is_file():
+        pytest.skip("weights not converted; run hidra-convert-weights")
+
+    fake_siblings = [type("S", (), {"rfilename": n})()
+                     for n in ["11fps_4bp_unsupervised.pkl", "thresholds.pkl", ".gitattributes"]]
+    fake_info = type("I", (), {"siblings": fake_siblings, "sha": "deadbeef"})()
+
+    class FakeApi:
+        def model_info(self, repo, revision=None):
+            return fake_info
+
+    monkeypatch.setattr("huggingface_hub.HfApi", lambda *a, **k: FakeApi())
+    adds, deletes, sha = publish.plan()
+
+    names = [n for n, _ in adds]
+    assert len(names) == 12, names                      # 10 checkpoints + thresholds + card
+    assert names.count("README.md") == 1, "the model card must be published"
+    assert "thresholds.json" in names
+    assert all(n.endswith((".safetensors", ".json", ".md")) for n in names), names
+    for config in ["11fps_4bp", "15fps_5bp", "19fps_6bp", "23fps_7bp", "27fps_6bp"]:
+        assert f"{config}_unsupervised.safetensors" in names
+        assert f"{config}_supervised_perlab_sniffall.safetensors" in names
+    assert all(p.is_file() for _, p in adds)
+    assert deletes == ["11fps_4bp_unsupervised.pkl", "thresholds.pkl"], deletes
+    assert sha == "deadbeef"
+
+
+def test_publish_plan_can_keep_the_pickles(monkeypatch):
+    from hidra import paths, publish
+
+    if not (paths.models_dir() / "thresholds.json").is_file():
+        pytest.skip("weights not converted")
+    fake = type("I", (), {"siblings": [type("S", (), {"rfilename": "a.pkl"})()], "sha": "x"})()
+    monkeypatch.setattr("huggingface_hub.HfApi",
+                        lambda *a, **k: type("A", (), {"model_info": lambda s, r, revision=None: fake})())
+    _, deletes, _ = publish.plan(drop_pickles=False)
+    assert deletes == []
+
+
+def test_model_card_ships_with_the_package():
+    from hidra import paths
+
+    card = paths.ASSETS_DIR / "model_card.md"
+    assert card.is_file(), "the model card must be packaged, not left in the repo root"
+    text = card.read_text()
+    assert text.startswith("---"), "needs YAML front matter for the Hub to render metadata"
+    assert "license:" in text and "safetensors" in text
+
+
+@pytest.mark.parametrize("name,other", [
+    ("15fps_5bp_unsupervised.safetensors", "15fps_5bp_unsupervised.pkl"),
+    ("15fps_5bp_unsupervised.pkl", "15fps_5bp_unsupervised.safetensors"),
+    ("thresholds.json", "thresholds.pkl"),
+    ("thresholds.pkl", "thresholds.json"),
+    ("README.md", None),
+])
+def test_download_format_fallback_mapping(name, other):
+    """The downloader must not assume which containers a given revision carries."""
+    from hidra.download_models import _other_format_name
+
+    assert _other_format_name(name) == other
+
+
+def test_download_fallback_only_triggers_on_404():
+    """A network or permissions failure must propagate, not be silently retried as the
+    other format -- otherwise a broken download looks like a missing file."""
+    from huggingface_hub.errors import EntryNotFoundError
+
+    from hidra.download_models import _is_missing_file
+
+    assert _is_missing_file(EntryNotFoundError("gone"))
+    assert not _is_missing_file(OSError("network down"))
+
+    class Resp:
+        status_code = 403
+
+    err = OSError("forbidden")
+    err.response = Resp()
+    assert not _is_missing_file(err)
+
+
+def test_missing_accepts_either_container(tmp_path):
+    """An existing models/ full of .pkl must not be re-downloaded as safetensors."""
+    from hidra.download_models import CONFIGS, missing
+
+    for config in CONFIGS:
+        (tmp_path / f"{config}_unsupervised.pkl").touch()
+        (tmp_path / f"{config}_supervised_perlab_sniffall.pkl").touch()
+    (tmp_path / "thresholds.pkl").touch()
+    assert missing(str(tmp_path)) == [], "a complete pkl-only dir should count as present"
+    assert missing(str(tmp_path), fmt="safetensors"), "explicit --format must still be strict"
+
+    (tmp_path / "thresholds.pkl").unlink()
+    assert missing(str(tmp_path)) == ["thresholds.json"]

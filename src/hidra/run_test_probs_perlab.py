@@ -24,7 +24,7 @@ import pandas as pd
 import jax
 import jax.numpy as jnp
 
-from . import paths, solution
+from . import checkpoints, paths, solution
 from .train_perlab_heads import MultiTaskPerLabModel
 
 OUT_DIR = str(paths.dataset_dir().parent / "analysis_outputs" / "test_predictions" / "perlab")
@@ -39,7 +39,8 @@ _PERLAB_CKPT = os.environ.get("HIDRA_PERLAB_CKPT")
 def perlab_ckpt_path(config_name):
     if _PERLAB_CKPT:
         return _PERLAB_CKPT.format(config=config_name)
-    return f"{solution.persist_dir}/{config_name}_supervised_perlab{_PERLAB_SUFFIX}.pkl"
+    return checkpoints.resolve_checkpoint(
+        solution.persist_dir, f"{config_name}_supervised_perlab{_PERLAB_SUFFIX}")
 
 
 def predict_into(config, predictions, num_epochs, dtype):
@@ -52,17 +53,17 @@ def predict_into(config, predictions, num_epochs, dtype):
     um = solution.UnsupervisedModel(d_res=192, d_lstm=192, d_ff=384, d_edge=96,
         n_layers=4, n_bp=config["num_bodyparts"], sample_rate=config["sample_rate"],
         aggregation_radius=config["aggregation_radius"], dtype=dtype)
-    upath = f"{solution.persist_dir}/{config['name']}_unsupervised.pkl"
+    upath = checkpoints.resolve_checkpoint(solution.persist_dir,
+                                           f"{config['name']}_unsupervised")
     sm = MultiTaskPerLabModel(d_res=256, d_ff=768, d_lstm=256, n_layers=3,
         n_bp=config["num_bodyparts"], padding=32, dtype=dtype,
         unsupervised_model=(um, upath))
     sm.set_context({"stage": "eval"})
-    weights = pickle.load(open(perlab_ckpt_path(config["name"]), "rb"))
-    # Force every leaf onto the device as a JAX array. The *published* checkpoints already
-    # unpickle that way (jax's own _reconstruct_array device_puts them), but a checkpoint
-    # written by any other tool -- notably a fine-tune produced by the PyTorch backend --
-    # holds plain numpy arrays, and then `Embedding.apply`'s `weights["w"][indices]` hands a
-    # traced index to numpy and dies with TracerArrayConversionError inside jit.
+    weights = checkpoints.load_checkpoint(perlab_ckpt_path(config["name"]))
+    # Force every leaf onto the device as a JAX array. hidra.checkpoints deliberately hands
+    # back plain numpy (so it needs no JAX), and a numpy-valued weight makes
+    # `Embedding.apply`'s `weights["w"][indices]` pass a traced index to numpy, which dies
+    # with TracerArrayConversionError inside jit.
     weights = jax.tree.map(jnp.asarray, weights)
     sm = sm.set_variables(weights)
 

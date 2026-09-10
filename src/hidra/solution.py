@@ -12,7 +12,7 @@ import jax.numpy as jnp
 import numpy as np
 import pandas as pd
 
-from . import data
+from . import checkpoints, data
 
 
 # The label vocabularies live in schema.py, which is jax-free so the PyTorch backend can
@@ -1077,7 +1077,8 @@ class SupervisedModel(Module):
         self.padding = padding
 
         unsupervised_model, unsupervised_path = unsupervised_model
-        unsupervised_params = pickle.load(open(unsupervised_path, "rb"))
+        # Either container. The values are identical; safetensors just needs no pickle.
+        unsupervised_params = checkpoints.load_checkpoint(unsupervised_path)
         feat_dim = unsupervised_model.n_layers * unsupervised_model.d_res
         node_dim = unsupervised_model.d_res
         unsupervised_model.set_context({"stage": "eval"})

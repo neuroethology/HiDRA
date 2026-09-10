@@ -32,12 +32,12 @@ import jax
 import jax.numpy as jnp
 import pandas as pd
 
-from . import paths, solution
+from . import checkpoints, paths, solution
 from .pm_rule import pm_action_ok
 
 MODELS_DIR = str(paths.models_dir())
 
-TH = pickle.load(open(os.path.join(MODELS_DIR, "thresholds.pkl"), "rb"))
+TH = checkpoints.load_thresholds(checkpoints.resolve_thresholds(MODELS_DIR))
 # Drop PleasantMeerkat attack/chase/escape heads (punctate artifacts; PM keeps only 'follow').
 TH_KEYS = [k for k in TH.keys() if pm_action_ok(*k)]     # 85 (lab, action) after PM cleanup
 LAB_ACTION = sorted(TH_KEYS)            # (lab, action), fixed order

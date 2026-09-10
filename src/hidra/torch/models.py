@@ -361,13 +361,10 @@ def load_state_into(module, flat_state, strict=True):
 
 
 def _read_checkpoint(path):
-    """Read either a published JAX .pkl or a converted .safetensors into a flat dict."""
-    from .checkpoint import flatten_tree, load_jax_checkpoint, read_state
+    """Read a checkpoint in either format into a flat {"layer/variable": array} dict."""
+    from ..checkpoints import load_flat_checkpoint
 
-    path = str(path)
-    if path.endswith(".safetensors"):
-        return read_state(path)
-    return flatten_tree(load_jax_checkpoint(path))
+    return load_flat_checkpoint(path)
 
 
 def build_unsupervised(config, dtype=torch.float32, device=None):
@@ -400,9 +397,8 @@ def load_unsupervised(config_name, path=None, dtype=torch.float32, device=None, 
 
     config = schema.get_configs()[config_name] if config is None else config
     if path is None:
-        base = paths.models_dir()
-        st = base / f"{config_name}_unsupervised.safetensors"
-        path = st if st.is_file() else base / f"{config_name}_unsupervised.pkl"
+        from ..checkpoints import resolve_checkpoint
+        path = resolve_checkpoint(paths.models_dir(), f"{config_name}_unsupervised")
     model = build_unsupervised(config, dtype=dtype, device=device).to(device)
     report = load_state_into(model, _read_checkpoint(path))
     # Layers store parameters in float32 and cast to the compute dtype in the forward,
@@ -440,9 +436,9 @@ def load_perlab(config_name, unsupervised_model=None, path=None, dtype=torch.flo
         if override:
             path = override.format(config=config_name)
         else:
-            base = paths.models_dir()
-            st = base / f"{config_name}_supervised_perlab_sniffall.safetensors"
-            path = st if st.is_file() else base / f"{config_name}_supervised_perlab_sniffall.pkl"
+            from ..checkpoints import resolve_checkpoint
+            path = resolve_checkpoint(paths.models_dir(),
+                                      f"{config_name}_supervised_perlab_sniffall")
 
     lab_action = schema.lab_action_table() if lab_action is None else lab_action
     model = build_perlab(config, unsupervised_model, n_heads=len(lab_action),
