@@ -672,7 +672,15 @@ class Dataset(BaseDataset):
                 mouse_pairs = []
                 for agent in agents:
                     if len(cross_pairs[agent]) == 0:
-                        target = rng.choice([i for i in mice if i != agent])
+                        # An agent with only a self-label needs a partner to fill the pair's target
+                        # slot, but its cross prediction is a dummy (cross_label = -1, masked out of
+                        # the loss). A single-mouse video has no other animal, so `rng.choice([])`
+                        # raised "a cannot be empty" and killed supervised training on any
+                        # single-animal clip. Fall back to the agent itself when it is the only mouse:
+                        # the target poses then duplicate the agent's, but nothing supervises them, so
+                        # the self-label still trains correctly.
+                        others = [i for i in mice if i != agent]
+                        target = rng.choice(others) if others else agent
 
                         mouse_pair = (agent, target)
                         self_label = video.labels.label_to_idx[(agent, agent)]
