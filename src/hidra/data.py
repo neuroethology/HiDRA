@@ -42,6 +42,33 @@ working_dir = str(paths.work_root() / "tmp")
 persist_dir = str(paths.models_dir())
 
 
+def _read_at(path, size, offset):
+    """Read `size` bytes at byte `offset` from `path`, portably across platforms.
+
+    Two POSIX-isms broke this on Windows: `os.pread` does not exist there, and `os.open`
+    without `O_BINARY` opens in text mode, so CRLF and Ctrl-Z (0x1A) translation silently
+    corrupts a binary read (the memory-mapped tracking/label cache) and the downstream
+    `np.frombuffer(...).reshape(...)` fails with a size mismatch. This keeps the fast atomic
+    `pread` path where it exists and falls back to `lseek` + a read loop where it does not;
+    `O_BINARY` is a no-op flag (0) off Windows.
+    """
+    fd = os.open(path, os.O_RDONLY | getattr(os, "O_BINARY", 0))
+    try:
+        if hasattr(os, "pread"):
+            return os.pread(fd, size, offset)
+        os.lseek(fd, offset, os.SEEK_SET)
+        parts, remaining = [], size
+        while remaining > 0:
+            chunk = os.read(fd, remaining)
+            if not chunk:
+                break
+            parts.append(chunk)
+            remaining -= len(chunk)
+        return b"".join(parts)
+    finally:
+        os.close(fd)
+
+
 class TrackingData:
     def __init__(self, path, dtype, num_frames, mouse_index, bodypart_index):
         self.path = path
@@ -75,9 +102,7 @@ class TrackingData:
             read_offset = frame_slice.start * self.frame_stride
             read_size = (frame_slice.stop - frame_slice.start) * self.frame_stride
 
-        fd = os.open(self.path, os.O_RDONLY)
-        buffer = os.pread(fd, read_size, read_offset)
-        os.close(fd)
+        buffer = _read_at(self.path, read_size, read_offset)
 
         frames = np.frombuffer(buffer, dtype=self.dtype)
         frames = frames.reshape((-1, self.num_mice, self.num_bodyparts, self.num_coords))
@@ -191,9 +216,7 @@ class Labels:
             read_offset = frame_slice.start * self.frame_stride
             read_size = (frame_slice.stop - frame_slice.start) * self.frame_stride
 
-        fd = os.open(self.path, os.O_RDONLY)
-        buffer = os.pread(fd, read_size, read_offset)
-        os.close(fd)
+        buffer = _read_at(self.path, read_size, read_offset)
 
         frames = np.frombuffer(buffer, dtype=self.dtype)
         frames = frames.reshape((-1, self.num_labels))
