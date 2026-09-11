@@ -621,3 +621,43 @@ def test_finetuned_checkpoint_loads_on_both_backends(annotated_dataset, track_di
     assert (a.call.to_numpy() == b.call.to_numpy()).all(), "calls differ across backends"
     print(f"\ntorch-trained checkpoint on both backends: max|prob diff| {diff:.2e}, "
           f"calls identical")
+
+
+@pytest.mark.slow
+@pytest.mark.jax
+@requires_jax
+@requires_weights
+@requires_cuda
+def test_jax_finetune_runs_from_safetensors_only(annotated_dataset, tmp_path):
+    """`finetune.py train --backend jax` must work on a fresh install, i.e. a models
+    directory holding only safetensors.
+
+    The JAX trainer used to hardcode `{config}_unsupervised.pkl` and
+    `{config}_supervised_perlab_sniffall.pkl` for its warm start -- the only two load sites
+    that did not go through `hidra.checkpoints` -- so it died with FileNotFoundError the
+    moment the Hub switched to safetensors, while the torch backend and inference on both
+    backends kept working. A smoke run is enough: the failure was at model construction.
+    """
+    from hidra import paths
+
+    models = paths.models_dir()
+    safetensors = sorted(models.glob("*.safetensors"))
+    if len(safetensors) < 10 or not (models / "thresholds.json").is_file():
+        pytest.skip("weights not converted; run hidra-convert-weights")
+    only = tmp_path / "models"
+    only.mkdir()
+    for f in safetensors:
+        (only / f.name).symlink_to(f)
+    (only / "thresholds.json").symlink_to(models / "thresholds.json")
+
+    res = subprocess.run(
+        [sys.executable, os.path.join(REPO, "finetune.py"), "train",
+         "--data", str(annotated_dataset), "--lab", "GroovyShrew", "--actions", "rear",
+         "--out", str(tmp_path / "ft_models"), "--tag", "jaxsmoke", "--mode", "head",
+         "--configs", "15fps_5bp", "--backend", "jax", "--smoke",
+         "--workdir", str(tmp_path / "work")],
+        capture_output=True, text=True, timeout=3600, cwd=REPO,
+        env={**os.environ, "HIDRA_MODELS_DIR": str(only)})
+    assert res.returncode == 0, f"{res.stdout[-3000:]}\n{res.stderr[-3000:]}"
+    assert "trained 1/1 config" in res.stdout, res.stdout[-2000:]
+    assert "warm-start copied" in res.stdout, "the JAX trainer did not warm-start from the published head"

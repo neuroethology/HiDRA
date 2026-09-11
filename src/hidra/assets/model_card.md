@@ -80,8 +80,10 @@ PyTorch backend is the more accurate of the two. The full analysis is in
 You can adapt one lab's head to your own arena, pose rig and annotation style, then
 re-calibrate its threshold. The trunk and the shared feature merge stay frozen. You
 **adopt** an existing (lab, behaviour) head — new behaviour names and new labs are not
-possible, since the head layer and lab-embedding table are fixed. See
-[docs/fine-tuning.md](https://github.com/talmolab/HiDRA/blob/main/docs/fine-tuning.md).
+possible through fine-tuning, since the head layer and lab-embedding table are fixed. See
+[docs/fine-tuning.md](https://github.com/talmolab/HiDRA/blob/main/docs/fine-tuning.md), and
+[docs/new-behaviours.md](https://github.com/talmolab/HiDRA/blob/main/docs/new-behaviours.md)
+for what to do when no head matches your behaviour.
 
 ## Limitations
 

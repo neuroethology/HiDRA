@@ -5,9 +5,11 @@ ethogram anyway. You pick one of the 82 trained classifier heads — a (lab, beh
 apply it to your videos as-is. Nothing is trained, nothing is fit to your data; the model has
 never seen your arena, your camera, or your annotator.
 
-This is what [`predict.py`](../predict.py) does. If zero-shot output is close but systematically
-off (your annotators call shorter bouts, your arena is a different size), fine-tune the head you
-picked instead: [fine-tuning.md](fine-tuning.md).
+This is what [`predict.py`](../predict.py) does (`hidra-predict` from an install is the same
+program). If zero-shot output is close but systematically off (your annotators call shorter bouts,
+your arena is a different size), fine-tune the head you picked instead:
+[fine-tuning.md](fine-tuning.md). If no head matches your behaviour at all, start with
+[new-behaviours.md](new-behaviours.md).
 
 ## 1. What you need
 
@@ -18,7 +20,7 @@ picked instead: [fine-tuning.md](fine-tuning.md).
 - `pix_per_cm` and `fps` per recording. **A missing pixel scale silently zeroes every
   prediction**, so HiDRA refuses to run without it. Either a `metadata.csv` in the folder or
   `--pix-per-cm N --fps N` on the command line.
-- The weights: `python download_models.py` (~660 MB from
+- The weights: `python download_models.py` (~660 MB of safetensors from
   [talmolab/HiDRA](https://huggingface.co/talmolab/HiDRA)).
 - A GPU. CPU works and is much slower.
 
@@ -53,7 +55,7 @@ Three things to know when choosing:
   `target == self`. Everything else is scored per ordered pair.
 - **Several labs usually have "your" behaviour.** They will not agree. Running all of them on a
   pilot recording and comparing is the cheapest way to find the one whose calls match what you
-  would have annotated.
+  would have annotated. `attack` has eight heads, `sniffgenital` six, `rear` five.
 
 Only `PleasantMeerkat`'s `follow` head is published — its attack/chase/escape annotations were
 single-bin artifacts and those heads were dropped.
@@ -82,8 +84,13 @@ head (`run,lab,action,subject,target`), you delete or zero rows, and pass it bac
 `--jobs jobs.csv`. Only labs with an enabled row are run, so the sheet is also the speed dial.
 
 Runtime is dominated by the number of **labs**, not behaviours: each lab is its own trunk
-embedding, so one full 5-config pass per lab (a few minutes per folder per lab on a modern GPU).
-Asking one lab for ten behaviours costs the same as asking it for one.
+embedding, so one full 5-config pass per lab. Asking one lab for ten behaviours costs the same as
+asking it for one. On an RTX A6000 one lab over three one-minute videos takes about eight seconds
+with the default PyTorch backend, most of it start-up; `--backend jax` runs the original
+implementation and pays XLA compilation per config on top ([pytorch-port.md](pytorch-port.md)).
+`--configs 15fps_5bp` runs a single ensemble member instead of five — quicker while you iterate
+on inputs, but lower quality and off the scale the thresholds were calibrated on, so not for
+results.
 
 ## 4. Read the output
 
@@ -98,6 +105,9 @@ Per input parquet, in `--out`:
 
 ```python
 import hidra
+hidra.heads(action="attack")                          # which labs have an attack head
+bouts = hidra.predict("tracking/", out="results/", labs=["LyricalHare"], actions=["attack"],
+                      pix_per_cm=16, fps=30)          # runs predict.py, returns the bouts
 bouts = hidra.bouts("results/")                       # all videos, with a `video` column
 frames = hidra.frames("results/")                     # per-frame probs
 rear = hidra.ethogram("results/", action="rear")      # filtered + sorted
@@ -128,15 +138,16 @@ you did not calibrate keep their published value. It needs no GPU and no trainin
 often the whole difference between "the calls look wrong" and "the calls look right", and it is
 worth doing before concluding you need to fine-tune. See
 [fine-tuning.md § Calibrate](fine-tuning.md#4-calibrate-the-thresholds) for the annotation CSV
-format.
+format; label behaviours with the head names `--list-heads` prints (so `sniffall`, not `sniff`,
+for the five splitting labs), since a label with no matching prediction track is not scored.
 
 ## 6. When zero-shot is the wrong tool
 
 - **Your behaviour is not in the vocabulary.** The action names are fixed: 33 of the 37 have a
   trained head, plus the merged `sniffall` (`none`, `dominancemount`, `disengage` and
   `genitalgroom` have none). There is no head to borrow for a behaviour nobody in the consortium
-  annotated, and fine-tuning cannot add one either (see
-  [fine-tuning.md § Limits](fine-tuning.md#limits-read-this-before-you-plan-an-experiment)).
+  annotated, and fine-tuning cannot add one either. [new-behaviours.md](new-behaviours.md) lays
+  out what can be done instead, from adopting another lab's head to training a new column.
 - **Pose is poor.** The model reads keypoints, not pixels. Swapped identities and dropped
   keypoints propagate straight into the calls.
 - **The pixel scale is wrong.** Everything is computed in cm. A `pix_per_cm` that is off by 2×

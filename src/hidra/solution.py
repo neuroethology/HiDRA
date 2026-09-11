@@ -585,9 +585,17 @@ class Trainer:
         self.model_seed, self.train_seed, self.eval_seed = seeds
 
         n_devices = jax.local_device_count()
-        mesh = jax.make_mesh((n_devices,), ("batch",))
-        jax.set_mesh(mesh)
-        self.sharding = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec("batch"))
+        if n_devices > 1:
+            mesh = jax.make_mesh((n_devices,), ("batch",))
+            jax.set_mesh(mesh)
+            self.sharding = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec("batch"))
+        else:
+            # A one-device "batch" mesh makes the LSTM scan's carry come back sharded
+            # (`bfloat16[256@batch,...]` vs an unsharded input) under jax 0.9, which kills
+            # pretrain()/train() before the first step. Unsharded is the identical
+            # computation on one GPU; train_perlab_heads.train_perlab has always run this way.
+            jax.set_mesh(jax.make_mesh((), ()))
+            self.sharding = None
 
     def get_ddi_loop(self):
         @functools.partial(jax.jit, donate_argnums=[0])
@@ -996,7 +1004,12 @@ class UnsupervisedModel(Module):
         return feats
 
 
-def pretrain(config):
+def pretrain(config, max_training_steps=125000):
+    """Stage 1: the self-supervised trunk for one ensemble config (docs/training.md).
+
+    Writes `{persist_dir}/{config}_unsupervised.pkl`. `max_training_steps` is the only knob
+    exposed -- lower it for a dry run of the data + environment before committing a GPU.
+    """
     videos = load_videos(mode="train", use_cached=True)
     train_videos, val_videos = split_videos(videos, validation_frac=0.15, random_seed=config["split_seed"])
 
@@ -1056,7 +1069,7 @@ def pretrain(config):
             "lower_is_better": True,
             "patience": 15000,
         },
-        max_training_steps=125000,
+        max_training_steps=max_training_steps,
     )
     trainer.train()
 
@@ -1182,7 +1195,10 @@ def get_custom_eval_loop(trainer):
     return custom_eval_loop
 
 
-def train(config):
+def train(config, max_training_steps=50000):
+    """The original shared 37-way supervised model (one head for all labs). HiDRA ships the
+    per-lab model from `train_perlab_heads.py` instead; this is kept for the threshold
+    derivation in `compute_ensemble_thresholds` and as the reference training loop."""
     videos = load_videos(mode="train", use_cached=True)
     train_videos, val_videos = split_videos(videos, validation_frac=0.15, random_seed=config["split_seed"])
     val_videos = [v for v in val_videos if v.lab_name not in TRAIN_ONLY_LABS]
@@ -1230,7 +1246,7 @@ def train(config):
         aggregation_radius=config["aggregation_radius"],
         dtype="bfloat16",
     )
-    unsupervised_path = f"{data.persist_dir}/{config['name']}_unsupervised.pkl"
+    unsupervised_path = str(checkpoints.resolve_checkpoint(data.persist_dir, f"{config['name']}_unsupervised"))
     supervised_model = SupervisedModel(
         d_res=256,
         d_ff=768,
@@ -1254,7 +1270,7 @@ def train(config):
             "lower_is_better": False,
             "patience": 10000,
         },
-        max_training_steps=50000,
+        max_training_steps=max_training_steps,
     )
     trainer.custom_eval_loop = get_custom_eval_loop(trainer)
     trainer.train()
@@ -1351,7 +1367,7 @@ def predict(config, predictions=None, is_val=False):
         aggregation_radius=config["aggregation_radius"],
         dtype="bfloat16",
     )
-    unsupervised_path = f"{data.persist_dir}/{config['name']}_unsupervised.pkl"
+    unsupervised_path = str(checkpoints.resolve_checkpoint(data.persist_dir, f"{config['name']}_unsupervised"))
     supervised_model = SupervisedModel(
         d_res=256,
         d_ff=768,

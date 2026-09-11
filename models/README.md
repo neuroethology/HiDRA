@@ -61,6 +61,9 @@ hidra-convert-weights --one ft_models/15fps_5bp__myrig.pkl
 Conversion verifies byte equality on read-back, and needs neither JAX nor PyTorch: the
 pickles reference exactly one JAX symbol, whose only job is to rebuild a numpy array.
 
+Training a new set of weights -- either stage, on your own data or the consortium's -- is
+described in [docs/training.md](../docs/training.md); both stages write into `HIDRA_MODELS_DIR`.
+
 To publish a set of weights to the Hub (needs a write token):
 
 ```bash
