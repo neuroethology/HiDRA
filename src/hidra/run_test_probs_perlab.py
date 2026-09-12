@@ -24,8 +24,8 @@ import pandas as pd
 import jax
 import jax.numpy as jnp
 
-from . import checkpoints, paths, solution
-from .train_perlab_heads import MultiTaskPerLabModel
+from . import checkpoints, head_table, paths, solution
+from .train_perlab_heads import LAB_ACTION, MultiTaskPerLabModel
 
 OUT_DIR = str(paths.dataset_dir().parent / "analysis_outputs" / "test_predictions" / "perlab")
 SNIFFALL = bool(os.environ.get("SNIFFALL"))          # load the namespaced 93-head sniffall model + its heads
@@ -55,11 +55,18 @@ def predict_into(config, predictions, num_epochs, dtype):
         aggregation_radius=config["aggregation_radius"], dtype=dtype)
     upath = checkpoints.resolve_checkpoint(solution.persist_dir,
                                            f"{config['name']}_unsupervised")
+    ckpt = perlab_ckpt_path(config["name"])
+    # A checkpoint widened by `finetune.py train --new-head` carries its own column list
+    # (hidra.head_table); build the head at that width, and P to match, instead of the
+    # published table's. None -> the published columns, as before.
+    table = head_table.load_head_table(ckpt)
+    weights = checkpoints.load_checkpoint(ckpt)
+    head_table.check_head_width(checkpoints.flatten_tree(weights),
+                                LAB_ACTION if table is None else table, source=str(ckpt))
     sm = MultiTaskPerLabModel(d_res=256, d_ff=768, d_lstm=256, n_layers=3,
         n_bp=config["num_bodyparts"], padding=32, dtype=dtype,
-        unsupervised_model=(um, upath))
+        unsupervised_model=(um, upath), lab_action=table)
     sm.set_context({"stage": "eval"})
-    weights = checkpoints.load_checkpoint(perlab_ckpt_path(config["name"]))
     # Force every leaf onto the device as a JAX array. hidra.checkpoints deliberately hands
     # back plain numpy (so it needs no JAX), and a numpy-valued weight makes
     # `Embedding.apply`'s `weights["w"][indices]` pass a traced index to numpy, which dies

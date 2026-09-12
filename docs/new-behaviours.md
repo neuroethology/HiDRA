@@ -29,8 +29,8 @@ Nothing else in the checkpoint moves, so the lab's other heads remain usable.
 ## 3. Your lab has no column for it, but another lab does → adopt the other lab
 
 The head table is sparse: GroovyShrew has `rear` and `sniffgenital` but no `mount`; ElegantMink
-has `mount`. There is no way to give GroovyShrew a `mount` column through `finetune.py`, so adopt
-ElegantMink for that behaviour and fine-tune *its* head on your data:
+has `mount`. The cheapest fix is to adopt ElegantMink for that behaviour and fine-tune *its* head on
+your data (§4 is the alternative when you want the column under your own lab):
 
 ```bash
 python finetune.py prepare --tracking parquets/ --annotations bouts.csv --lab ElegantMink --out ft_mount/
@@ -41,36 +41,64 @@ One fine-tune per adopted lab; predict each with its own `--labs`/`--weights`, a
 head` if you want each checkpoint to stay valid for its lab's other behaviours. `prepare` tells
 you which labs have a behaviour when the one you named does not.
 
-## 4. The name is in the vocabulary, but no lab has a head for it → a new column
+## 4. The name is in the vocabulary, but your lab has no column for it → add a column
 
-Four names have no head at all (`dominancemount`, `disengage`, `genitalgroom`, and the `none`
-placeholder), and any (lab, behaviour) pair not in the 82 is in the same position. A new column
-means **stage-2 training** ([training.md §3](training.md#3-stage-2-the-supervised-per-lab-tail-and-heads)),
-because the column set is fixed when the per-lab head is built:
+Any (lab, behaviour) pair not among the 82 — including the four names no lab has a head for at all
+(`dominancemount`, `disengage`, `genitalgroom`; `none` is a placeholder) — can be given a column
+with `finetune.py train --new-head Lab,action`. It is the same warm-start that added `sniffall`
+to the published model, made general: the published columns are copied into a one-wider head,
+the new column is trained on your annotations on top of the lab's frozen, already-trained
+features, and nothing else moves. PyTorch backend, one GPU, `head` mode:
 
-- The columns are the keys of `thresholds.json` in the models directory (one `[lab, action,
-  threshold]` row per column; the threshold *values* are not used for training), minus
-  PleasantMeerkat's attack/chase/escape, plus `sniffall` for the five sniff-splitting labs. Add a
-  row, and `train_perlab_heads.py` builds an 83-column head.
-- The action must be one of the vocabulary names in `schema.ACTIONS`; the lab must be one of the
-  21 in `schema.LABS`.
-- Annotate the behaviour under that name and stage it with `finetune.py prepare --thresholds` a
-  CSV that lists the new head (`Lab__action,0.3`), since `prepare` validates labels against the
-  head list it is given.
-- Train the per-lab foundation from scratch with the extended table, on the consortium data plus
-  yours. This is the expensive route: JAX-only, all of the merge/tail/heads relearn (the
-  self-supervised trunk stays frozen), 50k steps per config.
-- Inference then needs the same `thresholds.json` next to the checkpoints (`HIDRA_MODELS_DIR`) so
-  the head table matches the checkpoint's width, and a thresholds CSV carrying the new
-  `Lab__action` row so `predict.py --list-heads`/`--actions` know the head exists. Calibrate its
-  threshold with `finetune.py calibrate` like any other.
+```bash
+python finetune.py prepare --tracking parquets/ --annotations bouts.csv --lab GroovyShrew \
+    --new-head GroovyShrew,attack --out ft_attack/ --pix-per-cm 16 --fps 30
+python finetune.py train --data ft_attack/ --lab GroovyShrew --new-head GroovyShrew,attack \
+    --seed-from LyricalHare,attack --out ft_models/ --tag attack
+python predict.py held_out/ --labs GroovyShrew --actions attack --out ft_preds/ \
+    --weights 'ft_models/{config}__attack.pkl' --pix-per-cm 16 --fps 30
+python finetune.py calibrate --frames ft_preds/ --annotations bouts.csv --out ft_thresholds.csv
+python predict.py videos/ --labs GroovyShrew --actions attack --out results/ \
+    --weights 'ft_models/{config}__attack.pkl' --thresholds ft_thresholds.csv --pix-per-cm 16 --fps 30
+```
 
-The research code also contains the cheaper alternative that was used to add `sniffall` itself:
-warm-start from the published checkpoint, copy the 82 existing columns into their positions in
-the wider table, seed the new column from a related one, and train only the new column on frozen
-features (`FROZEN_TRUNK` in `train_perlab_heads.py`). That remap is hard-wired to the sniffall
-columns today — generalising it to an arbitrary new (lab, behaviour) is a code change, not a
-flag, and `finetune.py` does not expose it.
+- **`prepare --new-head`** admits bouts labelled with the new action, which it would otherwise
+  reject as "no head for". Annotate it exhaustively in every staged video, like any other
+  behaviour ([fine-tuning.md §1](fine-tuning.md#1-annotate)); for a social behaviour annotate
+  both directed pairs.
+- **`train --new-head`** builds, per config, an 83-column `out-proj-perlab`: the 82 published
+  columns (weights `w`, gain `s`, bias `b`) are copied by name into their positions in the extended
+  table, bit for bit; the layer's input-normalization statistics are per input feature and copy
+  unchanged. The new column starts from **`--seed-from Lab,action`** — an existing head of a
+  similar behaviour, typically another lab's version of the same one — or, without it, from a
+  fresh init. Seeding is what made the sniffall heads converge: a linear readout on frozen
+  features trained from scratch tends to plateau, while a related head's direction is already
+  most of the way there. Supervision is masked to the new column (add other heads of the lab
+  with `--actions new,existing` if you annotated them too), and only `--mode head` is allowed.
+- **The checkpoint carries its column list**: `ft_models/{config}__attack.heads.json` next to
+  each `.pkl`, and `hidra-convert-weights --one` writes the same list into the safetensors
+  metadata. Both backends' loaders read it before falling back to the published table, so
+  `predict.py --weights` runs the head without any edit to `models/thresholds.json` — and a
+  widened checkpoint separated from its sidecar refuses to load rather than mis-route columns.
+- **Seeing the head**: `predict.py --list-heads --weights 'ft_models/{config}__attack.pkl'`
+  lists it (marked as declared by the weights), `--actions attack` is accepted whenever those
+  weights are given, and `finetune.py calibrate` writes its `GroovyShrew__attack` row into the
+  thresholds CSV like any other head. Until then the new head uses the fallback threshold
+  (`pooled__attack`, else 0.30), so calibrate before drawing conclusions.
+- **What it cannot do.** The action must be one of the vocabulary names (§5 for a new *name*),
+  the lab one of the 15 that already have heads, and the pair must not already exist (fine-tune
+  it instead, §2). The tail is not retrained, so the column can only express what the lab's
+  frozen features already separate; if that is not enough, the full route below is what remains.
+  As with any fine-tune the ensemble is five configs, so predict only once all five are trained
+  (`--configs` for iterating), and pass `--labs <lab>` when predicting with the result.
+
+The full alternative is **stage-2 training** with an extended table
+([training.md §3](training.md#3-stage-2-the-supervised-per-lab-tail-and-heads)): add a
+`[lab, action, 0.3]` row to `thresholds.json` in a fresh `HIDRA_MODELS_DIR` and
+`train_perlab_heads.py` builds the wider head from scratch, tail included, on the consortium data
+plus yours. JAX-only, 50k steps per config, and inference then needs that `thresholds.json` next
+to the checkpoints. Reach for it when the new column needs features the frozen tail does not
+provide.
 
 ## 5. The name is not in the vocabulary at all
 
@@ -89,7 +117,7 @@ no longer means what the lab meant by it.
 
 | what | defined by | used by |
 |---|---|---|
-| the checkpoint's columns (which (lab, action) has a head, and in what order) | keys of `models/thresholds.json` → `schema.lab_action_table()` (`train_perlab_heads.LAB_ACTION` on the JAX side) | building the head at train and inference time; must match the checkpoint's width |
+| the checkpoint's columns (which (lab, action) has a head, and in what order) | keys of `models/thresholds.json` → `schema.lab_action_table()` (`train_perlab_heads.LAB_ACTION` on the JAX side); a checkpoint widened by `--new-head` carries its own list in `{config}__{tag}.heads.json` / safetensors metadata (`hidra.head_table`) | building the head at train and inference time; must match the checkpoint's width |
 | which heads the CLI lists, accepts in `--actions`, and thresholds | `Lab__action,threshold` rows of `derived_thresholds_train.csv` (or the CSV given to `--thresholds`) | `predict.py`, `finetune.py prepare/train` validation, `hidra.heads()` |
 | the `sniffall` label | synthesized as the OR of `sniff, sniffface, sniffbody, sniffgenital, reciprocalsniff` | the trainer's loss; `prepare` stages `sniffall` rows as `sniff` accordingly |
 | the label space | `schema.ACTIONS` (37 names; `sniffall` appended when `SNIFFALL=1`) and `schema.LABS` (21 labs) | every checkpoint |

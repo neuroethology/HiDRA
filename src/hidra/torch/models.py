@@ -16,6 +16,8 @@ Two transcription rules worth knowing when comparing against the reference:
   Order matters -- the divide happens before the where, so the NaN it produces is what
   gets replaced.
 """
+import os
+
 import numpy as np
 import torch
 import torch.nn as nn
@@ -414,37 +416,53 @@ def load_unsupervised(config_name, path=None, dtype=torch.float32, device=None, 
     return model
 
 
+def perlab_checkpoint_path(config_name):
+    """Where the per-lab head for `config_name` is read from.
+
+    `$HIDRA_PERLAB_CKPT` -- a template with a `{config}` placeholder -- when set, which is
+    how `hidra.cli` threads fine-tuned checkpoints through; otherwise the published
+    `<models_dir>/{config}_supervised_perlab_sniffall` in whichever container is present.
+    """
+    override = os.environ.get("HIDRA_PERLAB_CKPT")
+    if override:
+        return override.format(config=config_name)
+    from .. import paths
+    from ..checkpoints import resolve_checkpoint
+
+    return resolve_checkpoint(paths.models_dir(), f"{config_name}_supervised_perlab_sniffall")
+
+
 def load_perlab(config_name, unsupervised_model=None, path=None, dtype=torch.float32,
-                device=None, config=None, lab_action=None):
+                device=None, config=None, lab_action=None, state=None):
     """Build the per-lab head for `config_name`, load its weights, and wire up P.
 
     `unsupervised_model` defaults to loading the matching trunk. `path` defaults to
-    `<models_dir>/{config}_supervised_perlab_sniffall.pkl` (or the converted
-    `.safetensors`), or to `$HIDRA_PERLAB_CKPT` when set, which is how `hidra.cli`
-    threads fine-tuned checkpoints through.
-    """
-    import os
+    `perlab_checkpoint_path(config_name)`; `state` (a flat {"layer/variable": array} dict)
+    replaces reading it, for a caller that has already transformed the weights.
 
-    from .. import paths, schema
+    `lab_action` -- the head's (lab, action) column list -- defaults to the table the
+    checkpoint carries (`hidra.head_table.load_head_table`: a `.heads.json` sidecar or safetensors
+    metadata, written for checkpoints whose head is wider than the published 82 columns) and
+    otherwise to the published `schema.lab_action_table()`.
+    """
+    from .. import schema
+    from ..head_table import as_pairs, check_head_width, head_table_for
 
     config = schema.get_configs()[config_name] if config is None else config
     if unsupervised_model is None:
         unsupervised_model = load_unsupervised(config_name, dtype=dtype, device=device,
                                                config=config)
     if path is None:
-        override = os.environ.get("HIDRA_PERLAB_CKPT")
-        if override:
-            path = override.format(config=config_name)
-        else:
-            from ..checkpoints import resolve_checkpoint
-            path = resolve_checkpoint(paths.models_dir(),
-                                      f"{config_name}_supervised_perlab_sniffall")
+        path = perlab_checkpoint_path(config_name)
+    if state is None:
+        state = _read_checkpoint(path)
 
-    lab_action = schema.lab_action_table() if lab_action is None else lab_action
+    lab_action = head_table_for(path) if lab_action is None else as_pairs(lab_action)
+    check_head_width(state, lab_action, source=str(path))
     model = build_perlab(config, unsupervised_model, n_heads=len(lab_action),
                          n_actions=len(schema.ACTIONS), n_labs=len(schema.LABS),
                          dtype=dtype, device=device).to(device)
-    report = load_state_into(model, _read_checkpoint(path))
+    report = load_state_into(model, state)
     if dtype in (torch.float64,):
         model.to(dtype)
     model.load_report = report

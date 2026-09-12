@@ -18,19 +18,28 @@ the self-supervised trunk and the shared feature merge, and train the adopted la
 only that lab's selected behaviours.
 
 The saved checkpoint is written in the **JAX variable layout**, so a fine-tune produced
-here loads under either backend via `predict.py --weights`.
+here loads under either backend via `predict.py --weights`. Next to it goes a
+`{config}__{tag}.heads.json` sidecar naming the head's (lab, action) columns
+(`hidra.head_table`), so the checkpoint describes its own width.
+
+One addition beyond LABTAIL: `LABTAIL_NEW_HEAD="Lab,action"` (what `finetune.py train
+--new-head` sets) builds the head one column wider, copies the source checkpoint's columns
+into their positions in the extended table, starts the new column from
+`LABTAIL_SEED_FROM="Lab,action"` or a fresh init, and trains it in `head` mode -- the
+generalisation of the `FROZEN_TRUNK` sniffall remap in `train_perlab_heads.py`.
 """
 import argparse
 import os
 import sys
 import time
+import zlib
 
 import numpy as np
 import torch
 
 from .. import paths, schema
 from . import train as T
-from .models import load_perlab, load_unsupervised
+from .models import load_perlab, load_unsupervised, perlab_checkpoint_path
 
 # ------------------------------------------------------------------ configuration
 
@@ -77,6 +86,9 @@ def env_settings(config_name):
         "batch_size": int(os.environ.get("LABTAIL_BATCH", "128")),
         "dtype": os.environ.get("LABTAIL_DTYPE", "bfloat16"),
         "ddi_steps": int(os.environ.get("LABTAIL_DDI_STEPS", "256")),
+        # --new-head Lab,action / --seed-from Lab,action (finetune.py train): widen the head.
+        "new_head": os.environ.get("LABTAIL_NEW_HEAD") or None,
+        "seed_from": os.environ.get("LABTAIL_SEED_FROM") or None,
     }
 
 
@@ -259,6 +271,54 @@ def save_checkpoint(path, state):
     return path
 
 
+# ------------------------------------------------------------------ warm start
+
+def warm_start_head(settings, config, trunk, dtype, device):
+    """The per-lab head, warm-started from `perlab_checkpoint_path` (the published checkpoint,
+    or `$HIDRA_PERLAB_CKPT`). Returns (head, new_columns).
+
+    With `new_head` set the head is built one column wider than the source: the source's
+    columns are copied by name into their positions in the extended table
+    (`hidra.head_table.remap_head_columns`), and the new column starts from `seed_from`'s column
+    or a fresh init. Only `head` mode is allowed then -- the point of a new column is to fit
+    a linear readout on the lab's frozen, already-trained features, as sniffall was.
+    """
+    from .. import head_table as H
+    from ..checkpoints import load_flat_checkpoint
+
+    name = settings["config_name"]
+    src = perlab_checkpoint_path(name)
+    if not settings["new_head"]:
+        head = load_perlab(name, trunk, path=src, dtype=dtype, device=device, config=config)
+        return head, {}
+
+    try:
+        lab, action = H.parse_head_spec(settings["new_head"])
+        seed_from = H.parse_head_spec(settings["seed_from"]) if settings["seed_from"] else None
+        if lab != settings["lab"]:
+            raise ValueError(f"LABTAIL_NEW_HEAD names lab {lab!r} but LABTAIL is {settings['lab']!r}")
+        if settings["mode"] != "head":
+            raise ValueError(f"a new head column is trained in mode=head only, not {settings['mode']}")
+        old_table = H.head_table_for(src)
+        H.validate_new_head(lab, action, old_table, seed_from)
+        new_table = H.extend_table(old_table, [(lab, action)])
+        # Deterministic per (config, lab, action), so the five configs get different fresh
+        # draws but a re-run reproduces them.
+        seed = zlib.crc32(f"{name}:{lab}:{action}".encode())
+        flat, new_columns = H.remap_head_columns(load_flat_checkpoint(src), old_table, new_table,
+                                                 seed_from=seed_from, seed=seed)
+    except ValueError as e:
+        sys.exit(f"ERROR: {e}")
+
+    head = load_perlab(name, trunk, path=src, state=flat, lab_action=new_table, dtype=dtype,
+                       device=device, config=config)
+    j = new_columns[(lab, action)]
+    how = f"seeded from ({seed_from[0]}, {seed_from[1]})" if seed_from else "fresh init"
+    print(f"[NEW HEAD] ({lab}, {action}) -> column {j} of {len(new_table)} "
+          f"({len(old_table)} copied from {os.path.basename(str(src))}); {how}", flush=True)
+    return head, new_columns
+
+
 # ------------------------------------------------------------------ the run
 
 def finetune_config(settings, smoke=False, device=None):
@@ -282,7 +342,7 @@ def finetune_config(settings, smoke=False, device=None):
 
     # Warm start: every layer comes from the published checkpoint.
     trunk = load_unsupervised(settings["config_name"], dtype=dtype, device=device, config=config)
-    head = load_perlab(settings["config_name"], trunk, dtype=dtype, device=device, config=config)
+    head, _new_columns = warm_start_head(settings, config, trunk, dtype, device)
     n_train, n_frozen = T.set_trainable_layers(head, T.MODE_LAYERS[mode])
     print(f"[LABTAIL {lab}] warm-started; training {n_train} tensor(s) across "
           f"{len(T.MODE_LAYERS[mode])} layer(s), {n_frozen} frozen "
@@ -345,7 +405,11 @@ def finetune_config(settings, smoke=False, device=None):
     state = tuner.last_ema_values or tuner.ema.values()
     out = os.path.join(settings["out_dir"], f"{settings['config_name']}__{settings['tag']}.pkl")
     save_checkpoint(out, state)
-    print(f"saved {out}", flush=True)
+    # The head table travels with the checkpoint, so a widened head (--new-head) -- or any
+    # fine-tune, should thresholds.json ever change -- loads without external bookkeeping.
+    from ..head_table import save_head_table
+    side = save_head_table(out, head.lab_action)
+    print(f"saved {out}\n      {side} ({len(head.lab_action)} head columns)", flush=True)
     return out
 
 

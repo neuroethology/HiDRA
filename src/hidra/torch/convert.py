@@ -11,6 +11,10 @@ not need JAX either: see `checkpoint.load_jax_checkpoint`.)
 
 Conversion is a pure re-container: the float32 values are copied through unchanged, and
 `--verify` re-reads the result and asserts bit equality against the source.
+
+A checkpoint whose head is wider than the published table (`finetune.py train --new-head`)
+comes with a `.heads.json` sidecar; `--one` carries that table into the safetensors metadata
+(`lab_action`), so the converted file still describes its own columns (see `hidra.head_table`).
 """
 import argparse
 import sys
@@ -49,12 +53,19 @@ def convert_thresholds(models_dir, verify=True):
 def convert_one(pkl_path, out_path=None, verify=True, metadata=None):
     """Convert one checkpoint. Returns (out_path, n_tensors)."""
     from ..checkpoints import load_flat_checkpoint, save_safetensors
+    from ..head_table import METADATA_KEY, load_head_table, metadata_value
 
     pkl_path = Path(pkl_path)
     out_path = target_path(pkl_path) if out_path is None else Path(out_path)
     flat = load_flat_checkpoint(pkl_path)
 
     meta = {"source": pkl_path.name, "format": "hidra-jax-port-v1", "tensors": len(flat)}
+    # A widened head's column list rides along in the metadata; the published checkpoints
+    # carry none and keep being described by thresholds.json.
+    table = load_head_table(pkl_path)
+    if table is not None:
+        meta[METADATA_KEY] = metadata_value(table)
+        meta["n_heads"] = len(table)
     meta.update(metadata or {})
     save_safetensors(out_path, flat, metadata=meta)
 
@@ -74,6 +85,8 @@ def convert_one(pkl_path, out_path=None, verify=True, metadata=None):
             # several variables, like the running-stat counter `n`, are 0-d.)
             if np.ascontiguousarray(got).tobytes() != np.ascontiguousarray(want).tobytes():
                 raise RuntimeError(f"{out_path}: {key} values changed during conversion")
+        if table is not None and load_head_table(out_path) != table:
+            raise RuntimeError(f"{out_path}: the head table did not survive conversion")
     return out_path, len(flat)
 
 
@@ -97,8 +110,12 @@ def main(argv=None):
     verify = not args.no_verify
 
     if args.one:
+        from ..head_table import load_head_table
+
         out, n = convert_one(args.one, args.out, verify=verify)
-        print(f"{args.one} -> {out} ({n} tensors)")
+        table = load_head_table(out)
+        heads = f", {len(table)}-column head table in metadata" if table is not None else ""
+        print(f"{args.one} -> {out} ({n} tensors{heads})")
         return 0
 
     todo = source_paths(models_dir)

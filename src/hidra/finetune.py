@@ -47,6 +47,19 @@ ANNOTATION CSV (for `prepare` and `calibrate`)
     has a head for); `prepare` stages it as `sniff`, because the trainer derives the sniffall
     label from the sniff-family labels and a row literally named `sniffall` supervises nothing.
 
+ADDING A HEAD COLUMN (--new-head)
+  A lab's head has columns only for the behaviours it annotated. `train --new-head Lab,action`
+  gives it one more: the published columns are copied into a one-wider head, the new column
+  starts from `--seed-from Lab,action` (an existing head of a similar behaviour) or a fresh
+  init, and only that column is trained (mode=head, PyTorch backend). The action must be a
+  vocabulary name (predict.py --list-heads shows who has which); the checkpoint then carries
+  its own column list ({config}__{tag}.heads.json), so predict.py --weights knows the head.
+      python finetune.py prepare --tracking parquets/ --annotations bouts.csv --lab GroovyShrew \
+          --new-head GroovyShrew,attack --out ft_data/ --pix-per-cm 16 --fps 30
+      python finetune.py train --data ft_data/ --lab GroovyShrew --new-head GroovyShrew,attack \
+          --seed-from LyricalHare,attack --out ft_models/ --tag attack
+  See docs/new-behaviours.md.
+
 See docs/fine-tuning.md for what each mode trains, how much data helps, and the caveats.
 """
 import argparse
@@ -61,6 +74,7 @@ import numpy as np
 import pandas as pd
 
 from . import cli as hidra_predict   # vid_of / enum_heads / load_metadata / discover
+from . import head_table             # --new-head: the per-lab head's column list, and its sidecar
 from .schema import SNIFF_FAMILY     # numpy-only; the labels the merged sniffall head is built from
 
 CONFIGS = ["11fps_4bp", "15fps_5bp", "19fps_6bp", "23fps_7bp", "27fps_6bp"]
@@ -122,6 +136,35 @@ def suggested_actions(lab, annotated, hb):
     return heads, opt_in
 
 
+def resolve_new_head(spec, lab, hb, seed_from=None):
+    """Validate `--new-head Lab,action` (and `--seed-from`) for `lab`; returns
+    ((lab, action), seed_from_or_None). Exits with the reason on any problem.
+
+    The column list a new head extends is the published one (`schema.lab_action_table()`,
+    from models/thresholds.json); the thresholds CSV's heads are checked too, since that is
+    what `--list-heads` shows.
+    """
+    if spec is None:
+        if seed_from:
+            sys.exit("ERROR: --seed-from only makes sense together with --new-head")
+        return None, None
+    from . import schema
+    try:
+        pair = head_table.parse_head_spec(spec)
+        seed = head_table.parse_head_spec(seed_from) if seed_from else None
+        if pair[0] != lab:
+            raise ValueError(f"--new-head names lab {pair[0]!r} but --lab is {lab!r}; a column is "
+                             f"added under the lab whose data is staged")
+        table = schema.lab_action_table()
+        head_table.validate_new_head(pair[0], pair[1], table, seed)
+        if pair[1] in hb.get(lab, set()):
+            raise ValueError(f"({lab}, {pair[1]}) is already a head in the thresholds CSV; fine-tune it "
+                             f"with --actions {pair[1]} instead of --new-head")
+    except (ValueError, FileNotFoundError) as e:   # FileNotFoundError: no models/thresholds.json yet
+        sys.exit(f"ERROR: {e}")
+    return pair, seed
+
+
 def norm_mouse(m):
     """'1' / 1 / 'mouse1' -> 'mouse1'; 'self' passes through."""
     m = str(m).strip()
@@ -157,12 +200,14 @@ def read_annotations(path, stop_inclusive=False):
     return d
 
 
-def check_actions(annot, lab, thr_csv=None, drop_unsupported=False):
-    """Every annotated action must be a head of `lab`, else there is nothing to fine-tune."""
+def check_actions(annot, lab, thr_csv=None, drop_unsupported=False, extra_actions=()):
+    """Every annotated action must be a head of `lab`, else there is nothing to fine-tune.
+
+    `extra_actions` admits actions that are not heads yet -- the column `--new-head` adds."""
     hb = heads_by_lab(thr_csv)
     if lab not in hb:
         sys.exit(f"ERROR: no classifier heads for lab {lab!r}. Available labs: {sorted(hb)}")
-    mine = annotatable_actions(lab, hb)
+    mine = annotatable_actions(lab, hb) | set(extra_actions)
     unsupported = sorted(set(annot["action"]) - mine)
     if unsupported:
         elsewhere = {a: sorted(l for l, acts in hb.items() if a in acts) for a in unsupported}
@@ -194,7 +239,9 @@ def check_actions(annot, lab, thr_csv=None, drop_unsupported=False):
 def cmd_prepare(args):
     """Stage tracking parquets + bouts into {out}/TRAIN.csv + {out}/train_{tracking,annotation}/{lab}/."""
     annot = read_annotations(args.annotations, args.stop_inclusive)
-    annot = check_actions(annot, args.lab, args.thresholds, args.drop_unsupported)
+    new_head, _ = resolve_new_head(args.new_head, args.lab, heads_by_lab(args.thresholds))
+    annot = check_actions(annot, args.lab, args.thresholds, args.drop_unsupported,
+                          extra_actions=[new_head[1]] if new_head else ())
 
     parquets = hidra_predict.discover(args.tracking)
     if not parquets:
@@ -275,17 +322,28 @@ def cmd_prepare(args):
     # but writing both keeps a re-prepared dataset from being shadowed by a stale train.csv.
     man.to_csv(os.path.join(args.out, "train.csv"), index=False)
     staged = set(annot["action"])
+    # One place decides what `prepare` suggests; --new-head adds its column to that list
+    # rather than deriving a second one. Unioning before the `heads + opt_in` concatenation
+    # keeps the opt-in last, and makes the suggestion non-empty whenever --new-head is given.
     heads, opt_in = suggested_actions(args.lab, staged, heads_by_lab(args.thresholds))
+    extra = ""
+    if new_head:
+        if new_head[1] not in staged:
+            sys.exit(f"ERROR: --new-head {new_head[0]},{new_head[1]} but no bout is labelled "
+                     f"{new_head[1]!r}; the new column needs annotations to learn from")
+        heads = sorted(set(heads) | {new_head[1]})
+        extra = f" --new-head {new_head[0]},{new_head[1]}"
     print(f"\nstaged {len(man)} video(s) for lab {args.lab} -> {args.out}/")
     print(f"  labels staged: {sorted(staged)}")
     if heads:
-        print(f"  head columns these can train: {heads}")
+        print(f"  head columns these can train: {heads}"
+              + (f" ({new_head[1]} is the NEW column)" if new_head else ""))
     if opt_in:
         print(f"  head column 'sniffall' is trainable too, but only from the subtype(s) you "
               f"annotated ({sorted(staged & set(SNIFF_FAMILY))}): every other sniffing frame becomes "
               f"a negative for the merged head. Drop it from --actions if that is not what you mean.")
     print(f"next: python finetune.py train --data {args.out} --lab {args.lab} "
-          f"--actions {','.join(heads + opt_in)} --out ft_models/ --tag mytag")
+          f"--actions {','.join(heads + opt_in)}{extra} --out ft_models/ --tag mytag")
 
 
 # ------------------------------------------------------------------ train
@@ -300,14 +358,32 @@ def cmd_train(args):
         sys.exit(f"ERROR: {args.data} was staged for lab(s) {labs}, not {args.lab}")
     hb = heads_by_lab(args.thresholds)
     annotated = sorted({b.split(",")[-1] for bl in man["behaviors_labeled"] for b in json.loads(bl)})
+
+    from .download_models import require_weights
+    require_weights()                      # warm-starting needs the base checkpoints
+    new_head, seed_from = resolve_new_head(args.new_head, args.lab, hb, args.seed_from)
+    new_action = new_head[1] if new_head else None
+    if new_head:
+        if args.mode != "head":
+            sys.exit(f"ERROR: --new-head trains the new column in --mode head only (got {args.mode}): "
+                     "a new column is a linear readout on the lab's frozen, already-trained features")
+        if getattr(args, "backend", "torch") != "torch":
+            sys.exit("ERROR: --new-head is a PyTorch-backend workflow; drop --backend jax")
+        if new_action not in annotated:
+            sys.exit(f"ERROR: --new-head {new_head[0]},{new_action} but {new_action!r} is not annotated in "
+                     f"{man_path} (annotated: {annotated}); re-run `prepare --new-head` with bouts for it")
+
     if args.actions:
         actions = [a.strip() for a in args.actions.split(",") if a.strip()]
+        if new_action and new_action not in actions:
+            sys.exit(f"ERROR: --actions {args.actions} leaves out the new column {new_action!r}; "
+                     f"include it, or drop --actions to train it alone")
     else:
-        actions = trainable_heads(args.lab, annotated, hb)
+        actions = trainable_heads(args.lab, annotated, hb) if not new_head else [new_action]
         if not actions:
             sys.exit(f"ERROR: none of the staged labels {annotated} can train a {args.lab} head "
                      f"(its heads: {sorted(hb.get(args.lab, ()))})")
-    bad = sorted(set(actions) - hb.get(args.lab, set()))
+    bad = sorted(set(actions) - hb.get(args.lab, set()) - ({new_action} if new_action else set()))
     if bad:
         hint = ("; label sniffing 'sniffall' in the CSV, or pass --actions sniffall"
                 if set(bad) & set(SNIFF_FAMILY) and "sniffall" in hb.get(args.lab, set()) else "")
@@ -327,9 +403,6 @@ def cmd_train(args):
     if bad_cfg:
         sys.exit(f"ERROR: unknown config(s) {bad_cfg}; available: {CONFIGS}")
 
-    from .download_models import require_weights
-    require_weights()                      # warm-starting needs the base checkpoints
-
     out = os.path.abspath(args.out)
     os.makedirs(out, exist_ok=True)
     workdir = args.workdir or f"/dev/shm/hidra_finetune_{args.lab}_{tag}"
@@ -346,7 +419,8 @@ def cmd_train(args):
         "SCALE_TAG", "LOLO_EXCLUDE", "DISENTANGLE", "DISENTANGLE_AE", "LABTAIL_FRESH",
         "LABTAIL_HEAD_ONLY", "LABTAIL_EMB_ONLY", "LABTAIL_TUNE_MERGE", "LABTAIL_TRIM",
         "LABTAIL_VIDS", "LABTAIL_SRC", "CACHED_X0_DIR", "CACHED_PREMERGE_DIR", "SKIP_PATH",
-        "FILM", "CORAL", "TRAJ_KEEP", "DONOR_LAB", "CURATE_ACTION", "CURATE_VIDS", "FND_TAG"}}
+        "FILM", "CORAL", "TRAJ_KEEP", "DONOR_LAB", "CURATE_ACTION", "CURATE_VIDS", "FND_TAG",
+        "LABTAIL_NEW_HEAD", "LABTAIL_SEED_FROM"}}
     env = dict(env,
                SNIFFALL="1",                          # canonical 82-column head layout (adds sniffall)
                HIDRA_DATA_DIR=os.path.abspath(args.data),
@@ -374,10 +448,18 @@ def cmd_train(args):
         env["LABTAIL_SEED"] = str(args.seed)
     if args.eval_interval:
         env["LABTAIL_EVAL_INTERVAL"] = str(args.eval_interval)
+    if new_head:                                      # widen the head by this column (hidra.torch.train_perlab)
+        env["LABTAIL_NEW_HEAD"] = f"{new_head[0]},{new_head[1]}"
+        if seed_from:
+            env["LABTAIL_SEED_FROM"] = f"{seed_from[0]},{seed_from[1]}"
 
     print(f"fine-tuning {args.lab} {actions} (mode={args.mode}, steps={args.steps}, lr={args.lr}, "
           f"backend={getattr(args, 'backend', 'torch')}) on {n_train} video(s)"
           f"\n  -> {out}/{{config}}__{tag}.pkl")
+    if new_head:
+        print(f"  adding a NEW head column ({new_head[0]}, {new_action}), "
+              + (f"seeded from ({seed_from[0]}, {seed_from[1]})" if seed_from else "fresh init")
+              + f"; the checkpoint's column list is written to {out}/{{config}}__{tag}.heads.json")
     if args.mode == "tail":
         print("  note: mode=tail retrains the per-lab tail, which is SHARED across labs -- in the "
               f"resulting checkpoint only {args.lab} is meaningful, so always predict with "
@@ -417,6 +499,10 @@ def cmd_train(args):
           "then re-calibrate thresholds on held-out annotated videos:\n"
           "  python finetune.py calibrate --frames ft_preds/ --annotations heldout_bouts.csv "
           "--out ft_thresholds.csv")
+    if new_head:
+        print(f"the new ({new_head[0]}, {new_action}) head is known to predict.py through --weights "
+              f"(its {{config}}__{tag}.heads.json sidecar); `calibrate` gives it a threshold row, "
+              f"after which `--thresholds ft_thresholds.csv` lists it without --weights too.")
 
 
 def _resolve_videos(spec, man):
@@ -561,6 +647,9 @@ def main():
     p.add_argument("--drop-unsupported", action="store_true",
                    help="drop annotated actions the adopted lab has no head for, instead of erroring")
     p.add_argument("--thresholds", help="thresholds CSV defining the available heads (default: bundled)")
+    p.add_argument("--new-head", metavar="LAB,ACTION",
+                   help="also accept bouts labelled ACTION, a vocabulary behaviour the lab has no head "
+                        "for yet, to train a NEW head column with `train --new-head` (see docs/new-behaviours.md)")
     p.set_defaults(func=cmd_prepare)
 
     p = sub.add_parser("train", help="fine-tune the adopted lab's head(s) on the staged data",
@@ -592,6 +681,14 @@ def main():
     p.add_argument("--backend", default="torch", choices=["torch", "jax"],
                    help="training backend: torch (default) or jax (the original). Both write the "
                         "checkpoint in the same layout, so predict.py --weights loads either one")
+    p.add_argument("--new-head", metavar="LAB,ACTION",
+                   help="add a head column for this (lab, action) -- LAB must be --lab, ACTION a "
+                        "vocabulary behaviour the lab has no head for -- and train it (mode head, torch "
+                        "backend). The published columns are copied over unchanged; the checkpoint gets a "
+                        "{config}__{tag}.heads.json sidecar naming its columns")
+    p.add_argument("--seed-from", metavar="LAB,ACTION",
+                   help="with --new-head: start the new column from this existing head's weights "
+                        "(a similar behaviour, e.g. another lab's version of it) instead of a fresh init")
     p.set_defaults(func=cmd_train)
 
     p = sub.add_parser("calibrate", help="pick best-F1 thresholds from predictions + annotations",

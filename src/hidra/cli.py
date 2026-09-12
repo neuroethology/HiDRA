@@ -51,7 +51,7 @@ os.environ.setdefault("PREDICT_BATCH", "64")                 # long-video OOM gu
 os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "false")  # don't grab the whole GPU
 import numpy as np, pandas as pd
 
-from . import paths
+from . import head_table, paths
 
 ALL_LABS = ["AdaptableSnail", "BoisterousParrot", "CautiousGiraffe", "DeliriousFly", "ElegantMink",
             "GroovyShrew", "InvincibleJellyfish", "JovialSwallow", "LyricalHare", "NiftyGoldfinch",
@@ -91,42 +91,67 @@ def load_get_threshold(thr_csv=THR_CSV, const=None):
     return lambda lab, action: thr.get(f"{lab}__{action}", thr.get(f"pooled__{action}", DEFAULT_THR))
 
 
-def enum_heads(thr_csv=THR_CSV):
-    """(lab, action) for every classifier head, from the threshold file (includes sniffall)."""
+def weights_heads(weights, configs=None):
+    """The (lab, action) heads a `--weights` template's checkpoints declare, or an empty set.
+
+    A checkpoint made by `finetune.py train --new-head` is one column wider than the
+    published table and carries its own column list (a `.heads.json` sidecar next to a .pkl,
+    or safetensors metadata -- see hidra.head_table). Reading it here is what lets
+    `--actions <new behaviour>` and `--list-heads` know the head before its threshold row exists.
+    """
+    if not weights:
+        return set()
+    try:
+        table = head_table.head_table_for_template(os.path.abspath(weights), configs or ALL_CONFIGS)
+    except ValueError as e:
+        sys.exit(f"ERROR: {e}")
+    return set(table or ())
+
+
+def enum_heads(thr_csv=THR_CSV, weights=None, configs=None):
+    """(lab, action) for every classifier head: the threshold file's rows (includes sniffall),
+    plus any head the `weights` template's checkpoints declare (see weights_heads)."""
     d = pd.read_csv(thr_csv)
-    heads = []
+    heads = set()
     for k in d[d.columns[0]]:
         if "__" not in str(k):
             continue
         lab, act = str(k).split("__", 1)
         if lab != "pooled":
-            heads.append((lab, act))
-    return sorted(set(heads))
+            heads.add((lab, act))
+    return sorted(heads | weights_heads(weights, configs))
 
 
-def list_heads(thr_csv=THR_CSV):
+def list_heads(thr_csv=THR_CSV, weights=None, configs=None):
     """Print every available (lab, action) classifier head, grouped by lab."""
-    heads = enum_heads(thr_csv)
+    heads = enum_heads(thr_csv, weights, configs)
     by_lab = {}
     for lab, act in heads:
         by_lab.setdefault(lab, []).append(act)
     print(f"{len(heads)} classifier heads across {len(by_lab)} labs:\n")
     for lab in sorted(by_lab):
         print(f"  {lab:<21} {' '.join(sorted(by_lab[lab]))}")
+    extra = sorted(weights_heads(weights, configs) - set(enum_heads(thr_csv)))
+    if extra:
+        print(f"\n{len(extra)} head(s) declared by --weights and not in {thr_csv}: "
+              f"{', '.join(f'{l}/{a}' for l, a in extra)}\n  (they use the fallback threshold until "
+              "`finetune.py calibrate` writes them a row)")
     print("\nUse --labs / --actions to select a subset, or --dump-jobs for a per-pair job sheet.")
 
 
-def dump_jobs(path, thr_csv=THR_CSV):
-    rows = [dict(run=1, lab=lab, action=act, subject="*", target="*") for lab, act in enum_heads(thr_csv)]
+def dump_jobs(path, thr_csv=THR_CSV, weights=None, configs=None):
+    rows = [dict(run=1, lab=lab, action=act, subject="*", target="*")
+            for lab, act in enum_heads(thr_csv, weights, configs)]
     pd.DataFrame(rows).to_csv(path, index=False)
     print(f"Wrote job-sheet template with {len(rows)} classifier heads -> {path}")
     print("Edit it: set run=0 to skip a row; set subject/target to a mouse id (mouse1..), 'self', or '*' (all pairs).")
 
 
-def jobs_from_filters(labs=None, actions=None, subject="*", target="*", thr_csv=THR_CSV):
+def jobs_from_filters(labs=None, actions=None, subject="*", target="*", thr_csv=THR_CSV,
+                      weights=None, configs=None):
     """Build the same {(lab, action): [(subject, target)]} filter parse_jobs() returns, from
     --labs/--actions/--subject/--target instead of a job sheet. Unknown names are an error."""
-    heads = enum_heads(thr_csv)
+    heads = enum_heads(thr_csv, weights, configs)
     known_labs = sorted({l for l, _ in heads})
     known_acts = sorted({a for _, a in heads})
     if labs:
@@ -241,10 +266,6 @@ def run(folder, jobs=None, labs=None, actions=None, subject="*", target="*",
     """
     if backend not in ("torch", "jax"):
         sys.exit(f"ERROR: unknown backend {backend!r}; choose 'torch' or 'jax'")
-    if isinstance(jobs, str):
-        jobs = parse_jobs(jobs)
-    if jobs is None and (labs or actions or subject != "*" or target != "*"):
-        jobs = jobs_from_filters(labs, actions, subject, target, thresholds)
     if weights and "{config}" not in weights:
         sys.exit("ERROR: --weights must contain a '{config}' placeholder, e.g. "
                  "ft_models/{config}__myrig.pkl")
@@ -252,6 +273,10 @@ def run(folder, jobs=None, labs=None, actions=None, subject="*", target="*",
         bad = [c for c in configs if c not in ALL_CONFIGS]
         if bad:
             sys.exit(f"ERROR: unknown config(s) {bad}; available: {ALL_CONFIGS}")
+    if isinstance(jobs, str):
+        jobs = parse_jobs(jobs)
+    if jobs is None and (labs or actions or subject != "*" or target != "*"):
+        jobs = jobs_from_filters(labs, actions, subject, target, thresholds, weights, configs)
 
     from .download_models import require_weights
     require_weights()          # weights are hosted on Hugging Face, not in git
@@ -296,6 +321,11 @@ def run(folder, jobs=None, labs=None, actions=None, subject="*", target="*",
     if weights:
         env["HIDRA_PERLAB_CKPT"] = os.path.abspath(weights)   # resolved here, before the subprocess
         print(f"using fine-tuned per-lab weights: {weights}")
+        uncalibrated = sorted(weights_heads(weights, configs) - set(enum_heads(thresholds)))
+        if uncalibrated and threshold is None:
+            print(f"  note: {len(uncalibrated)} head(s) declared by these weights have no row in "
+                  f"{thresholds} and fall back to the pooled/{DEFAULT_THR} threshold: "
+                  f"{', '.join(f'{l}/{a}' for l, a in uncalibrated)} -- run `finetune.py calibrate`")
     if configs:
         env["HIDRA_CONFIGS"] = ",".join(configs)
         print(f"WARNING: running {len(configs)}/5 ensemble configs ({configs}) -- faster but "
@@ -361,7 +391,9 @@ def main():
     ap.add_argument("folder", nargs="?", help="folder of tracking parquets (.parquet/.pkt)")
     ap.add_argument("--jobs", help="CSV job sheet selecting lab/action/subject/target (default: all)")
     ap.add_argument("--dump-jobs", metavar="FILE", help="write an editable job-sheet template and exit")
-    ap.add_argument("--list-heads", action="store_true", help="print every (lab, action) classifier head and exit")
+    ap.add_argument("--list-heads", action="store_true",
+                    help="print every (lab, action) classifier head and exit (with --weights: including "
+                         "heads those checkpoints declare)")
     ap.add_argument("--labs", help="comma-separated classifier labs to run (quick alternative to --jobs)")
     ap.add_argument("--actions", help="comma-separated behaviours to run (quick alternative to --jobs)")
     ap.add_argument("--subject", default="*", help="acting mouse for --labs/--actions: mouse1..mouse4, self, or * (default *)")
@@ -386,10 +418,11 @@ def main():
     ap.add_argument("--keep-work", action="store_true", help="keep the scratch inference dir")
     args = ap.parse_args()
 
+    configs = [c.strip() for c in args.configs.split(",") if c.strip()] if args.configs else None
     if args.list_heads:
-        list_heads(args.thresholds); return
+        list_heads(args.thresholds, args.weights, configs); return
     if args.dump_jobs:
-        dump_jobs(args.dump_jobs, args.thresholds); return
+        dump_jobs(args.dump_jobs, args.thresholds, args.weights, configs); return
     if not args.folder:
         ap.error("provide a parquet folder (or use --dump-jobs FILE / --list-heads)")
     if args.jobs and (args.labs or args.actions):
@@ -401,8 +434,7 @@ def main():
         subject=args.subject, target=args.target, out=args.out, pix_per_cm=args.pix_per_cm,
         fps=args.fps, gpu=args.gpu, output=args.output, keep_work=args.keep_work,
         weights=args.weights, thresholds=args.thresholds, threshold=args.threshold,
-        backend=args.backend,
-        configs=[c.strip() for c in args.configs.split(",") if c.strip()] if args.configs else None)
+        backend=args.backend, configs=configs)
 
 
 if __name__ == "__main__":
