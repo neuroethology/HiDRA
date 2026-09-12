@@ -4,8 +4,8 @@ HiDRA -- the High-Dimensional Rodent Annotator.
 Apply the per-lab-head mouse-behaviour classifier ensemble to a folder of pose tracking parquets.
 
 QUICK START
-  # 0. one-time: fetch the model weights (~660 MB) from the Hugging Face Hub into models/
-  pip install huggingface_hub && python download_models.py
+  # 0. one-time: fetch the model weights (~660 MB, safetensors) from the Hugging Face Hub
+  python download_models.py                    # or: hidra-download-models
   # 1. see which (lab, action) classifiers exist:
   python predict.py --list-heads
   # 2a. run a few of them (zero-shot -- no labels of your own needed):
@@ -15,8 +15,9 @@ QUICK START
   python predict.py /path/to/parquet_folder --dump-jobs jobs.csv   # edit, then:
   python predict.py /path/to/parquet_folder --jobs jobs.csv --out results/
 
-  See docs/zero-shot.md for choosing a lab, and docs/fine-tuning.md for adapting a head
-  to your own annotations (finetune.py) and running it here with --weights/--thresholds.
+  See docs/zero-shot.md for choosing a lab, docs/fine-tuning.md for adapting a head to your
+  own annotations (finetune.py) and running it here with --weights/--thresholds, and
+  docs/new-behaviours.md when the behaviour you want is not among the 82 heads.
 
 INPUT
   A folder of tracking parquets (or .pkt), long format with columns:

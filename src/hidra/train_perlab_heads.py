@@ -722,7 +722,9 @@ def train_perlab(config, smoke=False):
         d_res=192, d_lstm=192, d_ff=384, d_edge=96, n_layers=4,
         n_bp=config["num_bodyparts"], sample_rate=config["sample_rate"],
         aggregation_radius=config["aggregation_radius"], dtype="bfloat16")
-    unsupervised_path = f"{solution.persist_dir}/{config['name']}_unsupervised.pkl"
+    # Either container: a fresh install carries safetensors only, an older one the pickles.
+    unsupervised_path = str(checkpoints.resolve_checkpoint(solution.persist_dir,
+                                                           f"{config['name']}_unsupervised"))
     model = MultiTaskPerLabModel(
         d_res=256, d_ff=768, d_lstm=256, n_layers=3,
         n_bp=config["num_bodyparts"], padding=32, dtype="bfloat16",
@@ -748,14 +750,16 @@ def train_perlab(config, smoke=False):
         # the per-lab TAIL (TAIL_TRAINABLE) + head -- the new-lab adaptation on top of frozen x0.
         # DISENTANGLE freezes SSL + feature-merge + enc_dyn; trains TAIL_TRAINABLE + disent-proj + heads.
         assert SNIFFALL, "warm-start modes are sniffall-only; set SNIFFALL=1 too"
-        if LABTAIL:
-            _srcpath = os.environ.get("LABTAIL_SRC") or f"{solution.persist_dir}/{config['name']}_supervised_perlab_sniffall.pkl"
-        elif DISENTANGLE:
-            _srcpath = f"{solution.persist_dir}/{config['name']}_supervised_perlab_sniffall.pkl"
+        if LABTAIL and os.environ.get("LABTAIL_SRC"):
+            _srcpath = os.environ["LABTAIL_SRC"]
+        elif LABTAIL or DISENTANGLE or REFIT:
+            _srcpath = checkpoints.resolve_checkpoint(solution.persist_dir,
+                                                      f"{config['name']}_supervised_perlab_sniffall")
         else:
-            _src = "_supervised_perlab_sniffall" if REFIT else "_supervised_perlab"
-            _srcpath = f"{solution.persist_dir}/{config['name']}{_src}.pkl"
-        existing = pickle.load(open(_srcpath, "rb"))
+            _srcpath = checkpoints.resolve_checkpoint(solution.persist_dir,
+                                                      f"{config['name']}_supervised_perlab")
+        # numpy arrays in either container; _merge copies them into JAX arrays where shapes match.
+        existing = checkpoints.load_checkpoint(_srcpath)
         _orig_cv = model.create_variables
         _stats = {"copied": 0, "trained": 0, "frozen": 0}
 

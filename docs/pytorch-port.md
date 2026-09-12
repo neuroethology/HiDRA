@@ -212,8 +212,13 @@ always set them as `solution.working_dir = ...`, and a plain re-import would let
 assignment shadow the real value, so the tracking cache would be built where no reader looks
 and nothing would complain.
 
-The `jax` extra is now needed only for `--backend jax` and for the exactness tests that
-compare the backends against each other.
+The `jax` extra is now needed for `--backend jax`, for the exactness tests that compare the
+backends against each other, and for training the trunk or a stage-2 foundation from scratch
+([training.md](training.md)) -- `solution.pretrain` and `train_perlab_heads.py` are not ported.
+Those two now resolve their checkpoints through `hidra.checkpoints` like everything else, so they
+run from a safetensors-only `models/`, and `solution.Trainer` no longer builds a one-device
+"batch" mesh, which under jax 0.9 made the LSTM scan's carry come back sharded and killed
+`pretrain()` before its first step (the per-lab trainer had always cleared that mesh itself).
 
 ### Two hazards the split exposed
 
@@ -243,12 +248,16 @@ lies in [0, 1] on both backends, which localizes this class of bug instantly.
 ```bash
 uv sync --extra jax --extra torch      # both backends in one environment
 hidra-download-models                  # ~660 MB
-python -m pytest -q                    # 91 tests, ~5 min on one A6000
-python -m pytest -q -m "not slow"      # ~1.5 min
+python -m pytest -q                    # ~15 min on one A6000 (the slow tests fine-tune)
+python -m pytest -q -m "not slow"      # ~2 min
 ```
 
-The suite needs a CUDA device and the JAX extra; tests skip cleanly without them. `reference/`
-holds the pre-port implementation byte-identically (guarded by
+The suite needs a CUDA device and the JAX extra; tests skip cleanly without them. The
+conversion and exactness tests also read the *original pickles* by name, so a `models/` with
+only the Hub's safetensors fails about thirty of them with `FileNotFoundError`; fetch the
+pickles alongside with `hidra-download-models --format pkl --revision
+4147d4fce1c46f7d56fdbf5dcc3e1e3b2888ba00` (see [models/README.md](../models/README.md)).
+`reference/` holds the pre-port implementation byte-identically (guarded by
 `tests/test_reference_pristine.py`) and is the ground truth every comparison is made against.
 
 Test data is synthetic and deterministic (`tests/synth.py`): two mice on a correlated random

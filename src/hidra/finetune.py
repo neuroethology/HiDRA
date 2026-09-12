@@ -42,6 +42,10 @@ ANNOTATION CSV (for `prepare` and `calibrate`)
     exhaustively within a video, and leave out videos you only skimmed.
   - Only one action can be positive per (agent, target) per frame: overlapping bouts of
     different behaviours on the same pair overwrite each other (last one wins).
+  - Label behaviours with the head names `predict.py --list-heads` prints. For the five labs
+    whose sniff head is the merged `sniffall`, label sniffing `sniffall` (or a subtype the lab
+    has a head for); `prepare` stages it as `sniff`, because the trainer derives the sniffall
+    label from the sniff-family labels and a row literally named `sniffall` supervises nothing.
 
 See docs/fine-tuning.md for what each mode trains, how much data helps, and the caveats.
 """
@@ -57,6 +61,7 @@ import numpy as np
 import pandas as pd
 
 from . import cli as hidra_predict   # vid_of / enum_heads / load_metadata / discover
+from .schema import SNIFF_FAMILY     # numpy-only; the labels the merged sniffall head is built from
 
 CONFIGS = ["11fps_4bp", "15fps_5bp", "19fps_6bp", "23fps_7bp", "27fps_6bp"]
 ANNOT_COLS = ["file", "agent", "target", "action", "start_frame", "stop_frame"]
@@ -69,6 +74,52 @@ def heads_by_lab(thr_csv=None):
     for lab, act in hidra_predict.enum_heads(thr_csv or hidra_predict.THR_CSV):
         out.setdefault(lab, set()).add(act)
     return out
+
+
+def annotatable_actions(lab, hb):
+    """Action names a bout CSV may carry for `lab`: its heads plus, when it has the merged
+    `sniffall` head, the sniff-family labels that head is derived from."""
+    acts = set(hb[lab])
+    if "sniffall" in acts:
+        acts |= set(SNIFF_FAMILY)
+    return acts
+
+
+def trainable_heads(lab, annotated, hb):
+    """The head columns of `lab` that a set of annotated action names can supervise.
+
+    `sniffall` has no label of its own: the trainer synthesizes it as the OR of the
+    sniff-family channels. It is included when plain `sniff` is annotated -- which is what
+    `prepare` stages a `sniffall` row as -- so that a subtype-only annotation set does not
+    silently redefine the merged head as that subtype.
+    """
+    heads = set(hb.get(lab, ()))
+    out = {a for a in annotated if a in heads}
+    if "sniffall" in heads and "sniff" in annotated:
+        out.add("sniffall")
+    return sorted(out)
+
+
+def supervisable(action, annotated):
+    """Does this set of annotated labels give `action`'s head column any supervision?"""
+    if action == "sniffall":
+        return any(a in annotated for a in SNIFF_FAMILY)
+    return action in annotated
+
+
+def suggested_actions(lab, annotated, hb):
+    """(head columns these labels train, columns to offer as an opt-in) for `prepare`'s next step.
+
+    The opt-in is `sniffall` for a subtype-only annotation set: the trainer ORs the sniff family,
+    so those labels do supervise the merged head -- just narrowly, as "sniffing is exactly this
+    subtype", which is rarely what is meant. Offering it rather than assuming it also keeps the
+    suggested command runnable: `trainable_heads` alone can be empty for a set `check_actions`
+    accepted, and `--actions ` with no value is an argparse error.
+    """
+    heads = trainable_heads(lab, annotated, hb)
+    opt_in = (["sniffall"] if "sniffall" not in heads and "sniffall" in hb.get(lab, ())
+              and supervisable("sniffall", annotated) else [])
+    return heads, opt_in
 
 
 def norm_mouse(m):
@@ -111,7 +162,7 @@ def check_actions(annot, lab, thr_csv=None, drop_unsupported=False):
     hb = heads_by_lab(thr_csv)
     if lab not in hb:
         sys.exit(f"ERROR: no classifier heads for lab {lab!r}. Available labs: {sorted(hb)}")
-    mine = hb[lab]
+    mine = annotatable_actions(lab, hb)
     unsupported = sorted(set(annot["action"]) - mine)
     if unsupported:
         elsewhere = {a: sorted(l for l, acts in hb.items() if a in acts) for a in unsupported}
@@ -126,6 +177,16 @@ def check_actions(annot, lab, thr_csv=None, drop_unsupported=False):
         annot = annot[~annot["action"].isin(unsupported)].copy()
         if annot.empty:
             sys.exit("ERROR: no annotations left after --drop-unsupported")
+    n_sniffall = int((annot["action"] == "sniffall").sum())
+    if n_sniffall:
+        # The model has no `sniffall` label channel: MultiTaskPerLabModel._labels37 (and its
+        # torch port) OVERWRITES that channel with the OR of the sniff-family channels, label
+        # and mask alike. A bout labelled `sniffall` would therefore supervise nothing -- the
+        # run logs a zero-weight loss -- so stage it under the plain family member.
+        print(f"  note: staging {n_sniffall} 'sniffall' row(s) as 'sniff' -- the trainer derives the "
+              f"merged sniffall label from the sniff-family labels ({', '.join(SNIFF_FAMILY)})")
+        annot = annot.copy()
+        annot.loc[annot["action"] == "sniffall", "action"] = "sniff"
     return annot
 
 
@@ -213,10 +274,18 @@ def cmd_prepare(args):
     # train.csv is what the trainers read; they copy TRAIN.csv over if it is absent,
     # but writing both keeps a re-prepared dataset from being shadowed by a stale train.csv.
     man.to_csv(os.path.join(args.out, "train.csv"), index=False)
+    staged = set(annot["action"])
+    heads, opt_in = suggested_actions(args.lab, staged, heads_by_lab(args.thresholds))
     print(f"\nstaged {len(man)} video(s) for lab {args.lab} -> {args.out}/")
-    print(f"  actions: {sorted(set(annot['action']))}")
+    print(f"  labels staged: {sorted(staged)}")
+    if heads:
+        print(f"  head columns these can train: {heads}")
+    if opt_in:
+        print(f"  head column 'sniffall' is trainable too, but only from the subtype(s) you "
+              f"annotated ({sorted(staged & set(SNIFF_FAMILY))}): every other sniffing frame becomes "
+              f"a negative for the merged head. Drop it from --actions if that is not what you mean.")
     print(f"next: python finetune.py train --data {args.out} --lab {args.lab} "
-          f"--actions {','.join(sorted(set(annot['action'])))} --out ft_models/ --tag mytag")
+          f"--actions {','.join(heads + opt_in)} --out ft_models/ --tag mytag")
 
 
 # ------------------------------------------------------------------ train
@@ -231,13 +300,27 @@ def cmd_train(args):
         sys.exit(f"ERROR: {args.data} was staged for lab(s) {labs}, not {args.lab}")
     hb = heads_by_lab(args.thresholds)
     annotated = sorted({b.split(",")[-1] for bl in man["behaviors_labeled"] for b in json.loads(bl)})
-    actions = [a.strip() for a in args.actions.split(",") if a.strip()] if args.actions else annotated
+    if args.actions:
+        actions = [a.strip() for a in args.actions.split(",") if a.strip()]
+    else:
+        actions = trainable_heads(args.lab, annotated, hb)
+        if not actions:
+            sys.exit(f"ERROR: none of the staged labels {annotated} can train a {args.lab} head "
+                     f"(its heads: {sorted(hb.get(args.lab, ()))})")
     bad = sorted(set(actions) - hb.get(args.lab, set()))
     if bad:
-        sys.exit(f"ERROR: {args.lab} has no head for {bad}; its heads are {sorted(hb[args.lab])}")
-    missing = sorted(set(actions) - set(annotated))
+        hint = ("; label sniffing 'sniffall' in the CSV, or pass --actions sniffall"
+                if set(bad) & set(SNIFF_FAMILY) and "sniffall" in hb.get(args.lab, set()) else "")
+        sys.exit(f"ERROR: {args.lab} has no head for {bad}; its heads are {sorted(hb[args.lab])}{hint}")
+    missing = sorted(a for a in actions if not supervisable(a, annotated))
     if missing:
-        sys.exit(f"ERROR: {missing} are not annotated in {man_path} (annotated: {annotated})")
+        detail = (f" ('sniffall' is derived from the sniff-family labels {SNIFF_FAMILY}, none of which "
+                  f"is annotated)" if "sniffall" in missing else "")
+        sys.exit(f"ERROR: {missing} are not annotated in {man_path} (annotated: {annotated}){detail}")
+    if "sniffall" in actions and "sniff" not in annotated:
+        print("  note: 'sniffall' will be trained on the annotated subtypes only "
+              f"({sorted(set(annotated) & set(SNIFF_FAMILY))}); every other sniffing frame becomes a "
+              "negative for the merged head")
     tag = args.tag or f"{args.lab}_{args.mode}"
     configs = [c.strip() for c in args.configs.split(",") if c.strip()] if args.configs else CONFIGS
     bad_cfg = [c for c in configs if c not in CONFIGS]
@@ -265,7 +348,7 @@ def cmd_train(args):
         "LABTAIL_VIDS", "LABTAIL_SRC", "CACHED_X0_DIR", "CACHED_PREMERGE_DIR", "SKIP_PATH",
         "FILM", "CORAL", "TRAJ_KEEP", "DONOR_LAB", "CURATE_ACTION", "CURATE_VIDS", "FND_TAG"}}
     env = dict(env,
-               SNIFFALL="1",                          # canonical 90-head layout (adds sniffall)
+               SNIFFALL="1",                          # canonical 82-column head layout (adds sniffall)
                HIDRA_DATA_DIR=os.path.abspath(args.data),
                PERLAB_WORKDIR=workdir,
                LABTAIL=args.lab,                      # new-lab adaptation: freeze SSL + feature merge
@@ -375,9 +458,11 @@ def cmd_calibrate(args):
 
     # gather per-head (score, label) over every scored (video, subject, target) track
     acc = {}
+    predicted_actions = set()
     for f in files:
         stem = os.path.basename(f)[: -len(".frames.parquet")]
         fr = pd.read_parquet(f, columns=["frame", "subject", "target", "lab", "action", "prob"])
+        predicted_actions |= set(fr["action"].unique())
         va = annot[annot["stem"] == stem]
         if va.empty:
             print(f"  note: no annotations for {stem}; skipped")
@@ -399,6 +484,12 @@ def cmd_calibrate(args):
             p[g["frame"].to_numpy()] = g["prob"].to_numpy(np.float32)
             a = acc.setdefault((lab, act), {"p": [], "y": [], "tracks": 0, "videos": set()})
             a["p"].append(p); a["y"].append(y); a["tracks"] += 1; a["videos"].add(stem)
+    unpredicted = sorted(set(annot["action"]) - predicted_actions)
+    if unpredicted:
+        print(f"  note: annotated action(s) {unpredicted} have no prediction track in these files and "
+              "are not scored -- either predict.py was not asked for them (--actions/--labs), or the "
+              "CSV does not use the head names `predict.py --list-heads` prints (the sniff-splitting "
+              "labs' sniff head is 'sniffall').")
     if not acc:
         sys.exit("ERROR: nothing to calibrate -- no (video, subject, target, action) track in the "
                  "predictions matched an annotated combination. Check that the annotation `file` "
