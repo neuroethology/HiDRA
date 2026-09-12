@@ -77,3 +77,33 @@ def test_read_annotations_stop_inclusive(tmp_path):
     incl = ft.read_annotations(csv, stop_inclusive=True)
     assert excl.loc[0, "stop_frame"] == 20 and incl.loc[0, "stop_frame"] == 21
     assert excl.loc[0, "agent"] == "mouse1" and excl.loc[0, "stem"] == "a"
+
+
+def test_prepare_never_suggests_an_empty_actions_list():
+    """Every label set `check_actions` accepts must yield a runnable `--actions`.
+
+    `annotatable_actions` lets a sniff-splitting lab's CSV carry any sniff-family name, but
+    `trainable_heads` maps only plain `sniff` onto the merged column -- so a `sniffface`-only
+    set used to print `--actions  --out ft_models/`, which argparse rejects outright.
+    """
+    hb = ft.heads_by_lab()
+    for lab in (SNIFFALL_LAB, PLAIN_LAB):
+        for label in sorted(ft.annotatable_actions(lab, hb)):
+            staged = set(ft.check_actions(_annot((label, "mouse2")), lab)["action"])
+            heads, opt_in = ft.suggested_actions(lab, staged, hb)
+            assert heads + opt_in, f"{lab}/{label} would print a bare `--actions` with no value"
+
+
+def test_sniff_subtype_only_offers_sniffall_as_an_opt_in():
+    hb = ft.heads_by_lab()
+    # sniffface is not a GroovyShrew head, but it does feed the merged sniffall column --
+    # offered, not assumed, because it would define sniffing as that subtype alone.
+    assert ft.suggested_actions(SNIFFALL_LAB, {"sniffface"}, hb) == ([], ["sniffall"])
+    # Plain `sniff` -- what prepare stages a `sniffall` row as -- trains it outright, no opt-in.
+    assert ft.suggested_actions(SNIFFALL_LAB, {"rear", "sniff"}, hb) == (["rear", "sniffall"], [])
+    # A lab's own subtype head is trainable, and still leaves sniffall on offer.
+    assert ft.suggested_actions(SNIFFALL_LAB, {"sniffgenital"}, hb) == (["sniffgenital"], ["sniffall"])
+    # Nothing sniff-related: no opt-in.
+    assert ft.suggested_actions(SNIFFALL_LAB, {"rear"}, hb) == (["rear"], [])
+    # A plain-sniff lab has no sniffall column to offer.
+    assert ft.suggested_actions(PLAIN_LAB, {"sniff"}, hb) == (["sniff"], [])

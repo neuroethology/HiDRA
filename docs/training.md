@@ -119,9 +119,13 @@ python -c "from hidra import solution as s; s.pretrain(s.get_configs()['15fps_5b
 ```
 
 That is the only knob `pretrain` exposes; everything else is fixed to what produced the published
-trunks. Measured on one RTX A6000 the step rate is about 1.4 s per batch of 128, so the full
-budget is on the order of two days per config (the published trunks were trained on a TPU v5e-8
-slice). Early stopping usually ends it sooner.
+trunks. A dry run still does the full round trip — it runs one validation pass before step 0 and
+copies the resulting checkpoint to `$HIDRA_MODELS_DIR/{config}_unsupervised.pkl`, which is the
+other reason that directory must be a fresh one. On one RTX A6000, over the three synthetic
+videos of `tests/synth.py`, a step of batch 128 takes about 0.5 s once XLA has compiled (~18 s),
+so the 125,000-step budget is on the order of a day per config — but the rate is set by how fast
+the numpy pipeline can feed the GPU, so a real corpus of longer videos will differ. The published
+trunks were trained on a TPU v5e-8 slice, and early stopping usually ends the run sooner.
 
 ## 3. Stage 2: the supervised per-lab tail and heads
 
@@ -229,7 +233,7 @@ rather than as a workflow.
 
 | run | backend | rate | note |
 |---|---|---|---|
-| stage 1 `pretrain`, 15fps_5bp | JAX | ~1.4 s/step, batch 128 | 125k-step budget ≈ 2 days/config |
+| stage 1 `pretrain`, 15fps_5bp | JAX | ~0.5 s/step, batch 128 (+~18 s XLA compile) | 125k-step budget ≈ 1 day/config at that rate |
 | stage 2 `train_perlab_heads`, 15fps_5bp, from scratch | JAX | 0.3–0.7 s/step | 50k-step budget ≈ 4–10 h/config |
 | `finetune.py train --mode head`, 15fps_5bp | PyTorch | ~0.55 s/step | + ~2 min input-statistics pass |
 | `finetune.py train --mode head`, 23fps_7bp | PyTorch | ~1.05 s/step | |

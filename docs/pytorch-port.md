@@ -257,8 +257,7 @@ conversion and exactness tests also read the *original pickles* by name, so a `m
 only the Hub's safetensors fails about thirty of them with `FileNotFoundError`; fetch the
 pickles alongside with `hidra-download-models --format pkl --revision
 4147d4fce1c46f7d56fdbf5dcc3e1e3b2888ba00` (see [models/README.md](../models/README.md)).
-`reference/`
-holds the pre-port implementation byte-identically (guarded by
+`reference/` holds the pre-port implementation byte-identically (guarded by
 `tests/test_reference_pristine.py`) and is the ground truth every comparison is made against.
 
 Test data is synthetic and deterministic (`tests/synth.py`): two mice on a correlated random

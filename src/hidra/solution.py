@@ -1064,6 +1064,9 @@ def pretrain(config, max_training_steps=125000):
         eval_dataset=val_dataset,
         train_batch_size=128,
         seed=[2] + config["pretrain_seed"],
+        # The loop advances a whole log interval at a time, so a budget under the default 500
+        # would silently round up to it -- which makes a short dry run cost a real training chunk.
+        train_log_interval=min(500, max_training_steps),
         early_stopping_config={
             "metric_name": "nll",
             "lower_is_better": True,
@@ -1265,6 +1268,7 @@ def train(config, max_training_steps=50000):
         eval_dataset=val_dataset,
         train_batch_size=128,
         seed=[2] + config["train_seed"],
+        train_log_interval=min(500, max_training_steps),   # see pretrain(): a short budget must stay short
         early_stopping_config={
             "metric_name": "f1",
             "lower_is_better": False,
