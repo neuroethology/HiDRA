@@ -12,8 +12,8 @@ Four things you can do with it, cheapest first:
 - **[Fine-tuning](docs/fine-tuning.md)** — you have some annotations. Adapt the head you picked to
   your arena, pose rig and annotation style, then re-calibrate its threshold: `finetune.py`.
 - **[Adding a behaviour](docs/new-behaviours.md)** — the behaviour you want has no head, or not
-  under the lab you want. What is possible ranges from adopting another lab's head to declaring a
-  new head column and training it.
+  under the lab you want. Adopt another lab's head, or give your lab a new head column with
+  `finetune.py train --new-head Lab,action` and train it on your annotations.
 - **[Training from scratch](docs/training.md)** — rebuild the self-supervised trunk and/or the
   supervised per-lab tail with the research code that produced the published weights.
 

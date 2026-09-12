@@ -169,6 +169,26 @@ DATASETS = {
 }
 
 
+def checkpoint_heads(lab, config_names):
+    """`lab`'s head set according to the checkpoints inference is about to load, or None when
+    the published table applies.
+
+    A checkpoint made by `finetune.py train --new-head` is one column wider than
+    thresholds.json describes, and carries its own (lab, action) table (hidra.head_table). That
+    table -- not LAB_HEADS -- says which tracks to keep, or the new head's probabilities would
+    be computed and then filtered out at save time.
+    """
+    template = os.environ.get("HIDRA_PERLAB_CKPT")
+    if not template:
+        return None
+    from .head_table import head_table_for_template
+
+    table = head_table_for_template(template, config_names)
+    if table is None:
+        return None
+    return {act for (l, act) in table if l == lab}
+
+
 class AllBehaviorLabels:
     """Self pairs (a,a) carry self-directed actions; cross pairs (a,t) carry
     cross-directed actions. Zeros label values (inference ignores them).
@@ -281,15 +301,6 @@ def main():
     L = args.embedding_lab
     emb_idx = int(schema.LABS.encode(L))
     schema.LABS.encode = lambda v, _i=emb_idx: _i     # embedding+heads -> L; keep real lab_name
-    heads = LAB_HEADS[L]   # ALL of lab L's heads (incl. sniffall for the 5 split labs)
-    print(f"[{args.dataset}/{L}] {len(heads)} heads: {sorted(heads)}", flush=True)
-
-    vids = load_videos(args.dataset, (i, n), args.smoke)
-    for v in vids:
-        v.labels = AllBehaviorLabels(num_frames=v.num_frames, mouse_ids=v.tracking_data.mouse_index)
-    print(f"[{args.dataset}/{L}] {len(vids)} videos (all-pairs all-behaviors labels)", flush=True)
-
-    preds = data.Predictions(vids)
     configs = schema.get_configs()
     # HIDRA_CONFIGS: run a SUBSET of the 5-config ensemble (comma-separated config names).
     # Cheaper and lower quality -- for iterating on a single fine-tuned config, not for results.
@@ -299,6 +310,17 @@ def main():
         assert not bad, f"HIDRA_CONFIGS: unknown config(s) {bad}; available: {list(configs)}"
         configs = {k: v for k, v in configs.items() if k in want}
         print(f"  WARNING: partial ensemble -- {len(configs)}/5 configs ({want})", flush=True)
+    # ALL of lab L's heads (incl. sniffall for the 5 split labs), or the checkpoint's own
+    # table when a fine-tuned checkpoint declares extra columns (--new-head).
+    heads = checkpoint_heads(L, list(configs)) or LAB_HEADS[L]
+    print(f"[{args.dataset}/{L}] {len(heads)} heads: {sorted(heads)}", flush=True)
+
+    vids = load_videos(args.dataset, (i, n), args.smoke)
+    for v in vids:
+        v.labels = AllBehaviorLabels(num_frames=v.num_frames, mouse_ids=v.tracking_data.mouse_index)
+    print(f"[{args.dataset}/{L}] {len(vids)} videos (all-pairs all-behaviors labels)", flush=True)
+
+    preds = data.Predictions(vids)
     t0 = time.time()
     for ci, (cfg_name, cfg) in enumerate(configs.items()):
         tc = time.time()

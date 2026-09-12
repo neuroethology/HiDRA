@@ -405,17 +405,24 @@ _LABS_ENCODE_ORIG = solution.LABS.value_to_idx.__getitem__
 _ACTIONS_ENCODE_ORIG = solution.ACTIONS.value_to_idx.__getitem__
 
 
-def build_P():
-    P = np.zeros((len(solution.LABS), len(solution.ACTIONS), N_HEADS), dtype="float32")
-    for j, (lab, act) in enumerate(LAB_ACTION):
+def build_P(lab_action=None):
+    """P for `lab_action`'s columns; default this module's LAB_ACTION. A checkpoint widened by
+    `finetune.py train --new-head` carries its own table (hidra.head_table), which the
+    inference loader passes here so P matches the checkpoint's columns."""
+    table = LAB_ACTION if lab_action is None else [tuple(p) for p in lab_action]
+    P = np.zeros((len(solution.LABS), len(solution.ACTIONS), len(table)), dtype="float32")
+    for j, (lab, act) in enumerate(table):
         P[solution.LABS.value_to_idx[lab], solution.ACTIONS.value_to_idx[act], j] = 1.0
     return jnp.asarray(P)
 
 
 class MultiTaskPerLabModel(solution.SupervisedModel):
-    def __init__(self, *args, **kwargs):
+    def __init__(self, *args, lab_action=None, **kwargs):
+        # lab_action: the head's (lab, action) columns; None -> this module's LAB_ACTION. The
+        # inference loader passes a checkpoint's own table when it declares extra columns.
         super().__init__(*args, **kwargs)
-        self.layers["out-proj-perlab"] = solution.Linear(self.d_res, N_HEADS, self.dtype)
+        self.lab_action = LAB_ACTION if lab_action is None else [tuple(p) for p in lab_action]
+        self.layers["out-proj-perlab"] = solution.Linear(self.d_res, len(self.lab_action), self.dtype)
         if SKIP_PATH:                                            # low-rank view of PRE-merge feats -> add to x0
             raw_dim = self.layers["ff-merge-in"].input_dim       # 2*feat_dim (per-node)
             # normalize_input=False: the fresh running-stat calibration on few adapt batches is numerically
@@ -431,7 +438,7 @@ class MultiTaskPerLabModel(solution.SupervisedModel):
         if DISENTANGLE:                                          # 128 -> d_res lift of z_dyn (fresh, trainable)
             self.layers["disent-proj"] = solution.Linear(D_DYN, self.d_res, self.dtype)
             self._dz = None                                      # (mu, sd, enc) set via set_disentangle()
-        self.P = build_P()
+        self.P = build_P(self.lab_action)
 
     def set_disentangle(self, *args):
         """Load this config's frozen enc_dyn into the instance. config_name is the LAST arg: the
