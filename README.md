@@ -32,7 +32,7 @@ uv sync --extra torch          # in a checkout: creates .venv
 or into an existing environment:
 
 ```bash
-pip install 'hidra[torch] @ git+https://github.com/talmolab/HiDRA'
+pip install 'hidra[torch] @ git+https://github.com/neuroethology/HiDRA'
 ```
 
 That gives you the `hidra-predict`, `hidra-finetune`, `hidra-download-models` and
@@ -62,7 +62,7 @@ and fine-tuning on the default PyTorch path need no JAX at all.
 
 The weights are **not in this repo** — at ~660 MB (individual files up to 156 MB) they exceed
 GitHub's file-size limit. They are hosted on the Hugging Face Hub instead, at
-**[talmolab/HiDRA](https://huggingface.co/talmolab/HiDRA)** (public, no login needed).
+**[Neuroethology/HiDRA](https://huggingface.co/Neuroethology/HiDRA)** (public, no login needed).
 Download them once into `models/` (needs ~700 MB free):
 
 ```bash

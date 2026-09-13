@@ -17,7 +17,7 @@ PKG = os.path.dirname(os.path.abspath(__file__))
 MODELS_DIR = os.path.join(PKG, "models")
 
 # The Hub repo holding the weights. Override with --repo / $HIDRA_HF_REPO.
-DEFAULT_REPO = os.environ.get("HIDRA_HF_REPO", "talmolab/HiDRA")
+DEFAULT_REPO = os.environ.get("HIDRA_HF_REPO", "Neuroethology/HiDRA")
 DEFAULT_REVISION = os.environ.get("HIDRA_HF_REVISION", "main")
 
 CONFIGS = ["11fps_4bp", "15fps_5bp", "19fps_6bp", "23fps_7bp", "27fps_6bp"]

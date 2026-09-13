@@ -13,7 +13,7 @@ pipeline_tag: video-classification
 
 # HiDRA — the High-Dimensional Rodent Annotator
 
-Model weights for [HiDRA](https://github.com/talmolab/HiDRA), a per-lab-head mouse social
+Model weights for [HiDRA](https://github.com/neuroethology/HiDRA), a per-lab-head mouse social
 behaviour classifier ensemble. Given pose tracking for two or more mice, it produces
 per-frame probabilities for **82 (lab, behaviour) classifier heads** across **15 labs** —
 each head being one lab's own definition of one behaviour, kept separate rather than
@@ -22,7 +22,7 @@ averaged into a single consensus classifier.
 ## Usage
 
 ```bash
-pip install 'hidra[torch] @ git+https://github.com/talmolab/HiDRA'
+pip install 'hidra[torch] @ git+https://github.com/neuroethology/HiDRA'
 hidra-download-models                        # fetches this repo into models/
 hidra-predict --list-heads                   # the 82 (lab, behaviour) heads
 
@@ -32,8 +32,8 @@ hidra-predict tracking/ --out results/ --pix-per-cm 16 --fps 30 \
 
 Input is a folder of long-format pose parquets (`video_frame, mouse_id, bodypart, x, y`)
 plus a pixel scale and frame rate per recording. Output is a per-frame probability track and
-a thresholded ethogram. See the [README](https://github.com/talmolab/HiDRA) for the input
-schema and [docs/zero-shot.md](https://github.com/talmolab/HiDRA/blob/main/docs/zero-shot.md)
+a thresholded ethogram. See the [README](https://github.com/neuroethology/HiDRA) for the input
+schema and [docs/zero-shot.md](https://github.com/neuroethology/HiDRA/blob/main/docs/zero-shot.md)
 for choosing a head.
 
 ## Files
@@ -73,7 +73,7 @@ One thing worth knowing if you compare backends yourself: on Ampere and later, J
 float32 matmuls in **TF32** by default, so the original path carries ~1e-3 relative error
 while the PyTorch path runs true float32 at ~1e-7. Measured against a float64 reference, the
 PyTorch backend is the more accurate of the two. The full analysis is in
-[docs/pytorch-port.md](https://github.com/talmolab/HiDRA/blob/main/docs/pytorch-port.md).
+[docs/pytorch-port.md](https://github.com/neuroethology/HiDRA/blob/main/docs/pytorch-port.md).
 
 ## Fine-tuning
 
@@ -81,8 +81,8 @@ You can adapt one lab's head to your own arena, pose rig and annotation style, t
 re-calibrate its threshold. The trunk and the shared feature merge stay frozen. You
 **adopt** an existing (lab, behaviour) head — new behaviour names and new labs are not
 possible through fine-tuning, since the head layer and lab-embedding table are fixed. See
-[docs/fine-tuning.md](https://github.com/talmolab/HiDRA/blob/main/docs/fine-tuning.md), and
-[docs/new-behaviours.md](https://github.com/talmolab/HiDRA/blob/main/docs/new-behaviours.md)
+[docs/fine-tuning.md](https://github.com/neuroethology/HiDRA/blob/main/docs/fine-tuning.md), and
+[docs/new-behaviours.md](https://github.com/neuroethology/HiDRA/blob/main/docs/new-behaviours.md)
 for what to do when no head matches your behaviour.
 
 ## Limitations
