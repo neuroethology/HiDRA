@@ -55,8 +55,8 @@ hidra-convert-weights = "hidra.torch.convert:main"
 hidra-publish-weights = "hidra.publish:main"
 
 [project.urls]
-Homepage = "https://github.com/talmolab/HiDRA"
-Weights = "https://huggingface.co/talmolab/HiDRA"
+Homepage = "https://github.com/neuroethology/HiDRA"
+Weights = "https://huggingface.co/Neuroethology/HiDRA"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/hidra"]

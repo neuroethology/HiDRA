@@ -21,7 +21,7 @@ your arena is a different size), fine-tune the head you picked instead:
   prediction**, so HiDRA refuses to run without it. Either a `metadata.csv` in the folder or
   `--pix-per-cm N --fps N` on the command line.
 - The weights: `python download_models.py` (~660 MB of safetensors from
-  [talmolab/HiDRA](https://huggingface.co/talmolab/HiDRA)).
+  [Neuroethology/HiDRA](https://huggingface.co/Neuroethology/HiDRA)).
 - A GPU. CPU works and is much slower.
 
 ## 2. Pick a classifier
