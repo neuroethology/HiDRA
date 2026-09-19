@@ -264,7 +264,10 @@ def load_videos(ds, shard, smoke):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--dataset", required=True, choices=list(DATASETS))
-    ap.add_argument("--embedding-lab", required=True, choices=COMPETITION_LABS)
+    # Not restricted to COMPETITION_LABS: a fine-tuned checkpoint (HIDRA_PERLAB_CKPT) may give
+    # a head-free slot its own columns, and that slot is then a lab like any other. The head
+    # table below is what decides which tracks are kept, so a lab with no head yields nothing.
+    ap.add_argument("--embedding-lab", required=True, choices=sorted(schema.LABS.value_to_idx))
     ap.add_argument("--shard", default="0/1")
     ap.add_argument("--epochs", type=int, default=1)
     ap.add_argument("--dtype", default="float32")
@@ -312,7 +315,11 @@ def main():
         print(f"  WARNING: partial ensemble -- {len(configs)}/5 configs ({want})", flush=True)
     # ALL of lab L's heads (incl. sniffall for the 5 split labs), or the checkpoint's own
     # table when a fine-tuned checkpoint declares extra columns (--new-head).
-    heads = checkpoint_heads(L, list(configs)) or LAB_HEADS[L]
+    heads = checkpoint_heads(L, list(configs)) or LAB_HEADS.get(L)
+    if not heads:
+        raise SystemExit(f"ERROR: lab {L} has no classifier head. The published labs are "
+                         f"{COMPETITION_LABS}; a head-free slot needs a checkpoint that gives it "
+                         f"one (finetune.py train --new-head, then predict.py --weights).")
     print(f"[{args.dataset}/{L}] {len(heads)} heads: {sorted(heads)}", flush=True)
 
     vids = load_videos(args.dataset, (i, n), args.smoke)

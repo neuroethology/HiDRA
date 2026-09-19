@@ -85,12 +85,64 @@ python predict.py videos/ --labs GroovyShrew --actions attack --out results/ \
   weights are given, and `finetune.py calibrate` writes its `GroovyShrew__attack` row into the
   thresholds CSV like any other head. Until then the new head uses the fallback threshold
   (`pooled__attack`, else 0.30), so calibrate before drawing conclusions.
+- **Several at once.** `--new-head` is repeatable: `--new-head GroovyShrew,attack --new-head
+  GroovyShrew,mount` widens the head by both columns in one run and supervises both.
 - **What it cannot do.** The action must be one of the vocabulary names (§5 for a new *name*),
-  the lab one of the 15 that already have heads, and the pair must not already exist (fine-tune
-  it instead, §2). The tail is not retrained, so the column can only express what the lab's
-  frozen features already separate; if that is not enough, the full route below is what remains.
-  As with any fine-tune the ensemble is five configs, so predict only once all five are trained
-  (`--configs` for iterating), and pass `--labs <lab>` when predicting with the result.
+  and the pair must not already exist (fine-tune it instead, §2). In `head` mode the tail is not
+  retrained, so the column can only express what the lab's frozen features already separate; if
+  that is not enough, use `--mode tail` (§4b) or the full route below. As with any fine-tune the
+  ensemble is five configs, so predict only once all five are trained (`--configs` for
+  iterating), and pass `--labs <lab>` when predicting with the result.
+
+## 4b. You want the columns under *your* lab, not someone else's → adopt a head-free slot
+
+The lab embedding has 21 rows; only 15 carry published head columns. Six more were in the
+consortium's training data but have no scored heads, and five of those can be claimed: naming
+one as `--lab` and giving it columns costs nothing published and makes it, in effect, your lab.
+
+```bash
+python predict.py --list-heads          # the 15 labs with heads
+python -c "from hidra.head_table import head_free_slots; print(head_free_slots())"
+```
+
+```
+['CRIM13', 'CalMS21_supplemental', 'CalMS21_task1', 'CalMS21_task2', 'MABe22_keypoints']
+```
+
+(`MABe22_movies` is the sixth row and is excluded: the data loader permutes that lab's
+bodyparts, because its published keypoints were scrambled, so your pose would be scrambled too.)
+
+```bash
+python finetune.py prepare --tracking parquets/ --annotations bouts.csv --lab MABe22_keypoints \
+    --new-head MABe22_keypoints,attack --new-head MABe22_keypoints,rear \
+    --out ft_data/ --pix-per-cm 16 --fps 30
+python finetune.py train --data ft_data/ --lab MABe22_keypoints \
+    --new-head MABe22_keypoints,attack --new-head MABe22_keypoints,rear \
+    --seed-from LyricalHare --mode tail --cache-features \
+    --out ft_models/ --tag mylab
+python predict.py held_out/ --labs MABe22_keypoints --actions attack,rear --out ft_preds/ \
+    --weights 'ft_models/{config}__mylab.pkl' --pix-per-cm 16 --fps 30
+```
+
+Two things differ from §4:
+
+- **`--seed-from <DonorLab>`** — a bare lab name rather than a `Lab,action` pair. Each new
+  column starts from that lab's column of the *same action* (here LyricalHare's `attack` and
+  `rear`), and the lab's **embedding row** is seeded from the donor's too. A head-free slot's
+  embedding row was only ever trained through the shared 38-way head on that consortium dataset,
+  so starting it at a lab whose recordings resemble yours puts your data where the tail's
+  features already make sense. A column whose action the donor lacks falls back to a fresh init,
+  and the run says so.
+- **`--mode tail`** is the point of doing it this way. With your own lab row you can retrain the
+  whole per-lab tail without making any *published* lab's head meaningless — the checkpoint
+  speaks for your lab, which is what `--labs` selects anyway. This is the "new-lab adaptation"
+  the leave-one-lab-out experiments used. `--mode head` still works and is cheaper; §3b of
+  [fine-tuning.md](fine-tuning.md) has the trade.
+
+The checkpoint carries its own column list, so `predict.py --weights` runs the slot as a lab like
+any other and `--list-heads --weights` shows its behaviours. Without those weights the slot has
+no head and `predict.py --labs <slot>` refuses, which is the intended behaviour: nothing published
+claims to classify anything for it.
 
 The full alternative is **stage-2 training** with an extended table
 ([training.md §3](training.md#3-stage-2-the-supervised-per-lab-tail-and-heads)): add a

@@ -283,9 +283,15 @@ def perlab_loss(head, batch, head_columns=None, include_shared=False):
     foundation training but *not* for LABTAIL fine-tuning (the shared head is frozen there
     and its loss would only add noise).
     """
+    return perlab_loss_from_feats(head, head.trunk_feats(batch), batch, head_columns,
+                                  include_shared)
+
+
+def perlab_loss_from_feats(head, x, batch, head_columns=None, include_shared=False):
+    """`perlab_loss` from the penultimate features `x` (`trunk_feats`' output, or a cache of
+    it). `batch` supplies the labels, masks and lab ids only."""
     from .. import schema
 
-    x = head.trunk_feats(batch)
     logits_perlab = head.layers["out-proj-perlab"](x)
 
     sniffall_id = schema.ACTIONS.value_to_idx.get("sniffall")
@@ -376,7 +382,8 @@ class FineTuner:
     def __init__(self, head, optimizer, train_batches, eval_fn=None, ema_decay=0.9993,
                  checkpoint_dir=None, max_training_steps=8000, log_interval=500,
                  eval_interval=500, metric_name="f1", lower_is_better=False,
-                 patience=10000, head_columns=None, ddi_steps=256, ddi_decay=0.99):
+                 patience=10000, head_columns=None, ddi_steps=256, ddi_decay=0.99,
+                 loss_fn=None):
         self.head = head
         self.optimizer = optimizer
         self.train_batches = train_batches
@@ -387,6 +394,9 @@ class FineTuner:
         self.head_columns = head_columns
         self.ddi_steps = ddi_steps
         self.ddi_decay = ddi_decay
+        # `loss_fn(head, batch) -> (loss, metrics)`; default the live `perlab_loss`. The
+        # cached-feature path (`FeatureCache`) supplies one that skips the frozen layers.
+        self.loss_fn = loss_fn
 
         self.tracked = self._tracked_tensors()
         self.ema = EMA(self.tracked, ema_decay)
@@ -429,7 +439,10 @@ class FineTuner:
 
     def train_step(self, batch):
         self.head.set_stage(STAGE_TRAIN)
-        loss, metrics = perlab_loss(self.head, batch, head_columns=self.head_columns)
+        if self.loss_fn is not None:
+            loss, metrics = self.loss_fn(self.head, batch)
+        else:
+            loss, metrics = perlab_loss(self.head, batch, head_columns=self.head_columns)
         self.optimizer.zero_grad()
         loss.backward()
         # EMA folds in the weights BEFORE the update, matching Trainer.train_step, so the
@@ -525,3 +538,143 @@ class swapped_tensors:
             for key, value in self.saved.items():
                 self.tensors[key].copy_(value)
         return False
+
+
+# ------------------------------------------------------------------ cached frozen features
+
+class FeatureCache:
+    """Outputs of the frozen layers for a fixed set of augmented windows, so the trainable
+    part of the model can be fit on them without re-running the trunk every step.
+
+    The fine-tuning modes leave everything up to some point frozen: `head` trains the
+    linear head on the tail's output, `embedding` and `tail` train the tail on the merge
+    output `x0`. Whatever is frozen is a deterministic function of the augmented window, so
+    it can be computed once per window and reused for as many optimizer steps as wanted.
+    That turns the ~0.5-1 s live step -- bound by the numpy data pipeline and the trunk --
+    into a millisecond one, at the price of a fixed set of augmentation draws: the cache
+    holds `passes` epochs of the training windows, each with its own augmentation, and
+    training cycles through them. This is the `CACHED_X0_DIR` fast path of the research
+    code, generalised to the head's own features and computed in-process.
+
+    `level` is "feats" (the tail's output, `trunk_feats`; for mode=head) or "x0" (the merge
+    output, `merge_feats`; for mode=embedding/tail). Features are stored on the CPU in the
+    dtype the model produced them (bfloat16 `x0` under the default compute dtype, float32
+    `feats`), labels alongside; `train_batches` re-shuffles windows every epoch and moves
+    one batch at a time to the device. Windows from the padding of a short final batch
+    (`batch_mask == 0`) are dropped at build time, so every cached window is a real one.
+    """
+
+    LEVELS = {"head": "feats", "embedding": "x0", "tail": "x0"}
+    LABEL_KEYS = ("self_labels", "cross_labels", "self_label_mask", "cross_label_mask", "lab_id")
+    # What `data.Predictions.update` reads from an element, besides the probabilities.
+    ELEMENT_KEYS = ("video_id", "agent_id", "target_id", "t_start", "t_end", "video_fps",
+                    "self_label_mask", "cross_label_mask")
+
+    def __init__(self, level):
+        if level not in ("feats", "x0"):
+            raise ValueError(f"level must be 'feats' or 'x0', got {level!r}")
+        self.level = level
+        self.feats = None
+        self.labels = {}
+        self.elements = None
+        self.n = 0
+        self.n_batches = 0
+
+    @torch.no_grad()
+    def build(self, head, batches, device, keep_elements=False):
+        """Run the frozen layers over `batches` -- raw numpy batch dicts from `data.batch`,
+        consumed to exhaustion -- and keep the results. `keep_elements` also keeps the
+        per-window fields `evaluate` needs. Returns self."""
+        from .infer import to_torch_batch
+
+        head.set_stage(STAGE_EVAL)
+        feats, labels, elements = [], {k: [] for k in self.LABEL_KEYS}, []
+        for batch in batches:
+            keep = np.asarray(batch["batch_mask"]) == 1
+            self.n_batches += 1
+            if not keep.any():
+                continue
+            tb = to_torch_batch(batch, device)
+            if self.level == "x0":
+                f = head.merge_feats(tb).permute(1, 0, 2)          # (B, tsteps, d_res)
+            else:
+                f = head.trunk_feats(tb)                           # (B, seq_len, d_res)
+            idx = torch.as_tensor(np.flatnonzero(keep), device=device)
+            feats.append(f.index_select(0, idx).to("cpu"))
+            for k in self.LABEL_KEYS:
+                labels[k].append(np.asarray(batch[k])[keep])
+            if keep_elements:
+                in_len = int(np.asarray(batch["agent"]).shape[1])
+                for i in np.flatnonzero(keep):
+                    el = {k: np.asarray(batch[k])[i].copy() for k in self.ELEMENT_KEYS}
+                    # Predictions.update reads only the length of "agent" and the mask flag.
+                    el["agent"] = np.zeros((in_len,), np.int8)
+                    el["batch_mask"] = np.int8(1)
+                    elements.append(el)
+        if not feats:
+            raise ValueError("no windows to cache: the dataset produced no valid elements")
+        self.feats = torch.cat(feats, dim=0)
+        self.labels = {k: torch.as_tensor(np.concatenate(v, axis=0)) for k, v in labels.items()}
+        # `to_torch_batch` hands the model a long lab_id; keep the cache's identical.
+        self.labels["lab_id"] = self.labels["lab_id"].long()
+        self.elements = elements if keep_elements else None
+        self.n = int(self.feats.shape[0])
+        return self
+
+    @property
+    def nbytes(self):
+        n = self.feats.numel() * self.feats.element_size()
+        return n + sum(v.numel() * v.element_size() for v in self.labels.values())
+
+    def _batch(self, idx, device):
+        idx = torch.as_tensor(idx, dtype=torch.long)
+        out = {"feats" if self.level == "feats" else "x0": self.feats[idx].to(device)}
+        for k, v in self.labels.items():
+            out[k] = v[idx].to(device)
+        # Every cached window is a real one: the padding of a short final batch was dropped
+        # at build time, so `batch_mask` is all ones and nothing is masked out of the loss.
+        out["batch_mask"] = torch.ones(len(idx), dtype=torch.int8, device=device)
+        return out
+
+    def train_batches(self, batch_size, device, seed=0):
+        """An endless stream of device-resident batches, re-shuffling every epoch. A final
+        short epoch batch is dropped rather than padded, unless it is the only one."""
+        g = torch.Generator().manual_seed(int(seed))
+        while True:
+            perm = torch.randperm(self.n, generator=g)
+            n_full = max(self.n // batch_size, 1)
+            for b in range(n_full):
+                yield self._batch(perm[b * batch_size:(b + 1) * batch_size], device)
+
+    def features(self, head, batch):
+        """The penultimate features for a cached batch: the cache itself at level "feats",
+        or the tail run live on cached `x0` (whose tail layers are what is being trained)."""
+        if self.level == "feats":
+            return batch["feats"]
+        x0 = batch["x0"].permute(1, 0, 2)                          # (tsteps, B, d_res)
+        return head.tail_feats(x0, batch["lab_id"])
+
+    def loss_fn(self, head_columns=None):
+        """A `FineTuner.loss_fn` computing `perlab_loss` from the cache."""
+        def fn(head, batch):
+            return perlab_loss_from_feats(head, self.features(head, batch), batch, head_columns)
+        return fn
+
+    @torch.no_grad()
+    def evaluate(self, head, videos, batch_size, device):
+        """Validation metrics from the cached windows (built with `keep_elements=True`), via
+        the same `data.Predictions.score()` the live evaluation uses."""
+        from .. import data
+
+        if self.elements is None:
+            raise ValueError("evaluate needs a cache built with keep_elements=True")
+        predictions = data.Predictions(videos)
+        for start in range(0, self.n, batch_size):
+            idx = torch.arange(start, min(start + batch_size, self.n))
+            batch = self._batch(idx, device)
+            probs = head.predict_from_feats(self.features(head, batch), batch["lab_id"])
+            probs = probs.detach().to("cpu", torch.float32).numpy()
+            for i, j in enumerate(idx.tolist()):
+                predictions.update(self.elements[j], probs[i])
+        metrics, _ = predictions.score()
+        return {k: float(v) for k, v in metrics.items()}

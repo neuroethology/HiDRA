@@ -64,23 +64,42 @@ def extend_table(table, new_pairs):
     return sorted(present | set(new))
 
 
+def head_free_slots(table=None):
+    """Lab slots whose embedding row exists but that own no column in `table` (default: the
+    published table). Sorted.
+
+    `finetune.py train --new-head <slot>,<action>` turns one of these into "your lab": the
+    slot's embedding row is retrained on your data and its new columns are the only heads it
+    has, so nothing published is touched. MABe22_movies is excluded although it qualifies --
+    `data.create_tracking_data` permutes that lab's bodyparts on load, because its published
+    keypoints were scrambled, so tracking staged under it would be scrambled too.
+    """
+    from . import schema
+
+    table = as_pairs(schema.lab_action_table() if table is None else table)
+    with_heads = {l for l, _ in table}
+    return sorted(l for l in schema.LABS.values if l not in with_heads and l != "MABe22_movies")
+
+
 def validate_new_head(lab, action, table, seed_from=None):
     """The checks behind `--new-head` (and `--seed-from`), worded for the command line.
 
     The action must be an existing vocabulary name: adding a *name* changes the label space
     every checkpoint was trained in and is out of scope (docs/new-behaviours.md §5). The lab
-    must already have heads, because everything downstream -- the inference driver's lab list,
-    `--labs` -- enumerates labs from the head table.
+    is any of the 21 embedding rows except MABe22_movies (whose keypoints the loader
+    unscrambles, so your data would be scrambled instead): a lab with published heads gets one
+    more column, a head-free slot becomes a new lab whose only heads are the ones you add.
+    `seed_from` is an existing (lab, action) column, or a donor *lab* name -- `(lab, None)` --
+    whose same-named columns (and embedding row) seed the new ones.
     """
     from . import schema
 
     table = as_pairs(table)
     if lab not in schema.LABS.value_to_idx:
         raise ValueError(f"unknown lab {lab!r}; the labs are {schema.LABS.values}")
-    labs_with_heads = sorted({l for l, _ in table})
-    if lab not in labs_with_heads:
-        raise ValueError(f"{lab} has no published head, so a column cannot be added under it; "
-                         f"labs with heads: {labs_with_heads}")
+    if lab == "MABe22_movies":
+        raise ValueError("MABe22_movies cannot take a head: the data loader permutes that lab's "
+                         f"bodyparts (scrambled source keypoints). Head-free slots: {head_free_slots(table)}")
     if action == "none" or action not in schema.ACTIONS.value_to_idx:
         raise ValueError(f"{action!r} is not a behaviour in the vocabulary "
                          f"({', '.join(a for a in schema.ACTIONS.values if a != 'none')}). A new head "
@@ -91,11 +110,60 @@ def validate_new_head(lab, action, table, seed_from=None):
                          f"--actions {action} instead of --new-head")
     if seed_from is not None:
         seed_from = tuple(seed_from)
-        if seed_from not in set(table):
+        if seed_from[1] is None:                       # a donor lab
+            donor_heads = sorted(a for l, a in table if l == seed_from[0])
+            if not donor_heads:
+                raise ValueError(f"--seed-from {seed_from[0]}: not a lab with published heads; labs "
+                                 f"with heads: {sorted({l for l, _ in table})}")
+            if seed_from[0] == lab:
+                raise ValueError(f"--seed-from {lab}: a lab cannot donate to itself")
+        elif seed_from not in set(table):
             who = sorted(l for l, a in table if a == seed_from[1])
             raise ValueError(f"--seed-from {seed_from[0]},{seed_from[1]} is not an existing head"
                              + (f"; labs with a {seed_from[1]!r} head: {who}" if who else ""))
     return lab, action
+
+
+def parse_head_specs(spec):
+    """'Lab,a1;Lab,a2' (or a list of 'Lab,action') -> [('Lab', 'a1'), ('Lab', 'a2')], unique."""
+    if spec is None:
+        return []
+    items = spec if isinstance(spec, (list, tuple)) else str(spec).split(";")
+    pairs = [parse_head_spec(s) for s in items if str(s).strip()]
+    if len(set(pairs)) != len(pairs):
+        raise ValueError(f"--new-head lists a (lab, action) twice: {spec}")
+    return pairs
+
+
+def parse_seed_spec(spec):
+    """`--seed-from`: 'Lab,action' -> ('Lab', 'action'); a bare 'Lab' -> ('Lab', None), meaning
+    a donor lab whose same-named columns (and embedding row) seed the new ones."""
+    parts = [p.strip() for p in str(spec).split(",")]
+    if len(parts) == 1 and parts[0]:
+        return parts[0], None
+    return parse_head_spec(spec)
+
+
+def seed_sources(new_pairs, seed_from, table):
+    """Which existing column seeds each new (lab, action): {new_pair: source_pair}.
+
+    `seed_from` = (lab, action) seeds every new column from that one head; (donor_lab, None)
+    seeds each new column from the donor's column of the same action, when it has one. New
+    columns without a source start from a fresh init. Returns also the list of new pairs the
+    donor could not seed."""
+    new_pairs, table = as_pairs(new_pairs), set(as_pairs(table))
+    if seed_from is None:
+        return {}, []
+    lab, action = tuple(seed_from)
+    if action is not None:
+        return {p: (lab, action) for p in new_pairs}, []
+    sources, unseeded = {}, []
+    for p in new_pairs:
+        if (lab, p[1]) in table:
+            sources[p] = (lab, p[1])
+        else:
+            unseeded.append(p)
+    return sources, unseeded
 
 
 # ------------------------------------------------------------------ persistence
@@ -198,6 +266,27 @@ def head_table_for_template(template, config_names):
 
 # ------------------------------------------------------------------ the column remap
 
+EMBEDDING_LAYER = "lab-embedding"
+
+
+def seed_embedding_row(flat, lab, donor):
+    """Copy `donor`'s row of the lab embedding into `lab`'s, in a shallow copy of `flat`.
+
+    A head-free slot's row was trained only through the shared 38-way head, on that
+    consortium dataset; starting it from a lab whose recordings resemble yours places your
+    data where that lab's tail features already make sense. This is `DONOR_LAB` in
+    `train_perlab_heads.py`.
+    """
+    from . import schema
+
+    key = f"{EMBEDDING_LAYER}/w"
+    w = np.array(flat[key], copy=True)
+    w[schema.LABS.value_to_idx[lab]] = w[schema.LABS.value_to_idx[donor]]
+    out = dict(flat)
+    out[key] = w
+    return out
+
+
 def check_head_width(flat, table, source="the checkpoint"):
     """Refuse a checkpoint whose head width does not match `table`, with the fix spelled out.
 
@@ -257,11 +346,17 @@ def remap_head_columns(flat, old_table, new_table, seed_from=None, seed=0):
 
     new_columns = {pair: position[pair] for pair in new_table if pair not in set(old_table)}
     if seed_from is not None:
-        seed_from = tuple(seed_from)
-        if seed_from not in set(old_table):
-            raise ValueError(f"seed_from {seed_from} is not a column of old_table")
-        i = old_table.index(seed_from)
-        for j in new_columns.values():
+        # One (lab, action) for every new column, or a {new_pair: source_pair} mapping.
+        if isinstance(seed_from, dict):
+            sources = {tuple(k): tuple(v) for k, v in seed_from.items()}
+        else:
+            sources = {pair: tuple(seed_from) for pair in new_columns}
+        for pair, src in sources.items():
+            if src not in set(old_table):
+                raise ValueError(f"seed_from {src} is not a column of old_table")
+            if pair not in new_columns:
+                raise ValueError(f"seed target {pair} is not a new column")
+            i, j = old_table.index(src), new_columns[pair]
             new_w[..., j] = w[..., i]
             new_s[..., j] = s[..., i]
             new_b[..., j] = b[..., i]

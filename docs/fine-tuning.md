@@ -21,11 +21,12 @@ annotate  →  prepare  →  train  →  predict --weights  →  calibrate  → 
 
 ## Limits (read this before you plan an experiment)
 
-- **You adopt an existing head.** The per-lab head has 82 columns, one per published
-  (lab, behaviour) pair — `python predict.py --list-heads` — and `finetune.py` can only train
-  those. The behaviour vocabulary (37 names plus the merged `sniffall`) and the 21-row lab
-  embedding are fixed, so there is no new behaviour name and no new lab to be had here; what *is*
-  possible, and what it costs, is in [new-behaviours.md](new-behaviours.md).
+- **You adopt an existing head, or add a column.** The published head has 82 columns, one per
+  (lab, behaviour) pair — `python predict.py --list-heads` — and this document is about
+  continuing to train one of those. The behaviour *vocabulary* is fixed (37 names plus the
+  merged `sniffall`), but the set of columns is not: `train --new-head` adds one, including
+  under a lab slot that has no published head, which makes that slot your own lab. That is
+  [new-behaviours.md](new-behaviours.md); everything below applies to it too.
 - **Everything downstream refers to your data by the adopted lab's name** — `--labs`, thresholds,
   the `lab` column of the outputs. Pick the lab whose zero-shot calls were closest.
 - **One behaviour per (subject, target) per frame.** Labels are stored as one action id per pair
@@ -161,18 +162,62 @@ config while iterating (pair it with `predict.py --configs <same>`), `--seed`, `
 `--backend`, and `--smoke` for a short wiring check that writes no checkpoint. Run `--smoke` first
 on a new dataset: it takes about a minute and catches every staging mistake.
 
-**Time.** Measured on one RTX A6000 in `head` mode, PyTorch backend: about 0.5 s per step for the
-15 fps config and 1 s per step for the 23 fps one, plus a few minutes per config for the
-input-statistics pass — so the default 8000 steps is one to two hours per config, and most of a
-day for the ensemble. Throughput is bound by the numpy data pipeline (eight worker processes), not
-the GPU: forward-only initialization batches take as long as training steps. On a small dataset
-the `head`-mode loss plateaus within a few hundred steps; try `--steps 1000` and let §4 decide
-whether more helps. `tail` mode is the same speed per step but needs more of them.
+**Time.** Live, every step re-runs the frozen trunk over a fresh batch of windows, which on one
+RTX A6000 costs about 0.5 s for the 15 fps config and 1 s for the 23 fps one. The default 8000
+steps is then one to two hours per config and most of a day for the ensemble — and almost none of
+that work depends on what is being trained. **`--cache-features` removes it**; read the next
+section before starting a long run.
 
 Validation is carved out of your staged videos automatically (~15% by duration). With only one or
 two staged videos there is nothing to hold out, so the validation set overlaps training and its F1
 is not a generalization estimate — use the held-out `calibrate` run in §4 for that. The reported
 val-F1 covers only the behaviours your annotations score.
+
+## 3b. Making it fast
+
+Every mode freezes everything before the layers it trains, and what is frozen is a fixed function
+of the augmented window. Recomputing it each step is the entire cost of a live run. `--cache-features`
+computes it once per window instead:
+
+```bash
+python finetune.py train --data ft_data/ --lab GroovyShrew --actions rear,sniffall \
+    --out ft_models/ --tag myrig --cache-features
+```
+
+The objective is unchanged and the loss curve tracks the live one. What changes is the
+augmentation: instead of a fresh draw every step, the cache holds `--cache-passes` draws (default
+4) of every training window and the run cycles through them. On a small annotation set that is a
+fair trade — with three recordings the cache is a few hundred windows and tens of megabytes — and
+on a large one it is the knob that decides memory.
+
+Measured on one RTX A6000, 15 fps config, `head` mode, two behaviours, three synthetic
+recordings, 300 steps of one config:
+
+| variant | input statistics | feature pass | 300 steps | wall clock | final `nll_perlab` |
+|---|---|---|---|---|---|
+| live | 142 s | — | 168 s | 5 min 16 s | 0.5122 |
+| `--cache-features` | 191 s * | 3 s | 9 s | 3 min 27 s | 0.5114 |
+| `--cache-features --ddi-steps 32` | 28 s | 3 s | 7 s | 42 s | 0.5058 |
+| `--cache-features --ddi-steps 0` | — | 3 s | 7 s | **14 s** | 0.5146 |
+
+\* that run shared the machine with a second training job; the identical pass took 142 s run
+alone. It is the same work in the first two rows either way.
+
+Per step that is 560 ms live against 23–31 ms cached, and the same optimisation: the loss
+trajectories overlap. The step loop stops being the cost, which turns the remaining one — the
+**input-statistics pass** — into the thing to think about. Before training, HiDRA re-estimates
+the per-feature mean and standard deviation the head's layers standardize their inputs with, over
+256 batches, exactly as the original trainer does. It is the reason "even in `head` mode the other
+columns are not strictly frozen output" above. `--ddi-steps N` shortens it, and `--ddi-steps 0`
+skips it entirely, keeping the published statistics: the resulting checkpoint then leaves every
+other lab's head bit-identical, at the cost of reading your data through the consortium's
+statistics rather than your own. On a rig close to the adopted lab's that is a reasonable default;
+measure it with §4 on held-out data rather than assuming.
+
+What caching does **not** speed up is `tail` mode, where the BiLSTM tail is the trainable part and
+still runs every step: caching `x0` saves the trunk (~30% of the step) and no more. `head` mode
+trains 258 numbers per behaviour — one 256-weight column, a gain and a bias — and is where the
+whole speed-up lives.
 
 ## 4. Calibrate the thresholds
 

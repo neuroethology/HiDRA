@@ -285,8 +285,17 @@ def run(folder, jobs=None, labs=None, actions=None, subject="*", target="*",
     if not parquets:
         sys.exit(f"no .parquet/.pkt files in {folder}")
     meta = load_metadata(folder, parquets, pix_per_cm, fps)
-    run_labs = sorted({lab for (lab, _) in jobs}) if jobs else ALL_LABS
-    run_labs = [l for l in run_labs if l in ALL_LABS]
+    # A checkpoint from `finetune.py train --new-head` can carry columns for a lab that has
+    # no published head -- a head-free slot adopted as the user's own lab. Those labs are
+    # runnable only when such weights are given, so they join the list from the weights.
+    runnable = ALL_LABS + sorted({l for l, _ in weights_heads(weights, configs)} - set(ALL_LABS))
+    run_labs = sorted({lab for (lab, _) in jobs}) if jobs else runnable
+    dropped = [l for l in run_labs if l not in runnable]
+    if dropped:
+        sys.exit(f"ERROR: no classifier weights for lab(s) {dropped}. The published labs are "
+                 f"{ALL_LABS}; a head-free slot is runnable only with the --weights that give it "
+                 f"a head.")
+    run_labs = [l for l in run_labs if l in runnable]
     print(f"{len(parquets)} parquet(s); running {len(run_labs)} lab classifier set(s): {run_labs}")
 
     allbp, canon7 = bodypart_schema()
