@@ -167,6 +167,14 @@ def split_labtail_videos(videos, config, lab, video_ids=None):
     val_videos = [v for v in pool if int(v.video_id) in va_ids]
     if video_ids:
         train_videos = [v for v in pool if int(v.video_id) in video_ids]
+    elif len(train_videos) < len(pool):
+        # The 85/15 split is seeded globally, so on a handful of staged videos it can put a
+        # whole recording on the validation side -- which on two videos means training on
+        # one of them. Never silently: say which, and how to override.
+        held = sorted(int(v.video_id) for v in pool if v not in train_videos)
+        print(f"[LABTAIL] the seeded 85/15 split holds {len(held)} of {len(pool)} staged "
+              f"video(s) out of TRAINING: {held}. Pass --videos to train on all of them.",
+              flush=True)
     if not val_videos:
         # Guarantee an eval signal even for a handful of videos; may overlap the train set,
         # as in the original. The metric is then optimistic -- calibrate on held-out data.
