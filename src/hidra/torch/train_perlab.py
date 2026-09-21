@@ -319,7 +319,7 @@ def warm_start_head(settings, config, trunk, dtype, device):
 
     try:
         new_pairs = H.parse_head_specs(settings["new_head"])
-        seed_from = H.parse_seed_spec(settings["seed_from"]) if settings["seed_from"] else None
+        seeds = H.parse_seed_specs(settings["seed_from"])
         for lab, _action in new_pairs:
             if lab != settings["lab"]:
                 raise ValueError(f"LABTAIL_NEW_HEAD names lab {lab!r} but LABTAIL is "
@@ -327,17 +327,21 @@ def warm_start_head(settings, config, trunk, dtype, device):
         old_table = H.head_table_for(src)
         new_table = old_table
         for lab, action in new_pairs:              # validate against the table as it grows
-            H.validate_new_head(lab, action, new_table, seed_from)
+            H.validate_new_head(lab, action, new_table)
             new_table = H.extend_table(new_table, [(lab, action)])
         # Which existing column seeds each new one; the per-column line below reports the
         # ones a donor lab could not cover, so the second return value is not needed here.
-        sources = H.seed_sources(new_pairs, seed_from, old_table)[0]
+        sources = H.seed_sources(new_pairs, seeds, old_table, lab=settings["lab"])[0]
         # Deterministic per (config, columns), so the five configs get different fresh draws
         # but a re-run reproduces them.
         seed = zlib.crc32((f"{name}:" + ":".join(f"{l}:{a}" for l, a in new_pairs)).encode())
         flat, new_columns = H.remap_head_columns(load_flat_checkpoint(src), old_table, new_table,
                                                  seed_from=sources or None, seed=seed)
-        donor = seed_from[0] if seed_from and seed_from[1] is None else None
+        # A bare `--seed-from <Lab>` says "be like this lab", which includes where the lab
+        # sits in embedding space; a `Lab,action` entry only speaks for one behaviour. With
+        # several base donors the last one wins, as it does for the columns.
+        base_donors = [d for d, a in seeds if a is None]
+        donor = base_donors[-1] if base_donors else None
         if donor:
             flat = H.seed_embedding_row(flat, settings["lab"], donor)
     except ValueError as e:

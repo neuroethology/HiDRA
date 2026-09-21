@@ -82,6 +82,19 @@ mouseB_day1.parquet,mouse2,self,rear,88,140
   positive), matching the trainer. If your `stop_frame` is the last positive frame — which is
   what `predict.py`'s `bouts.csv` writes — pass `--stop-inclusive` and it is converted for you.
 
+**Already have per-video annotation parquets?** `--annotations` also takes a *folder* of them,
+one `<name>.parquet` per recording with columns `agent_id, target_id, action, start_frame,
+stop_frame` — the layout the trainer itself reads, and what `HiDRA_finetune.zip`'s
+`prepare_dataset.py` took as input. Files are matched to tracking by stem or by the video id
+that stem hashes to, so either naming works and nothing needs converting.
+
+**Behaviours you watched for and did not see.** A video with no bouts of a behaviour teaches
+the model nothing about it: combinations a video does not annotate are ignored, not treated as
+absent. `--also-scored 'mouse1,mouse2,attack;mouse2,mouse1,attack'` declares those combinations
+scored in *every* staged video, so their non-bout frames become negatives — and staging then
+includes recordings with no bouts at all. Use it when your scoring protocol really did cover
+every video, and not otherwise: it turns unwatched frames into confident negatives.
+
 How much is enough? There is no single answer — it depends on how far your setup is from the
 adopted lab's. Measure it rather than guess: hold out at least one recording, then run
 [`calibrate`](#4-calibrate-the-thresholds) twice, once on your zero-shot predictions for the
@@ -157,10 +170,13 @@ frozen output: training re-estimates the input-normalization statistics (which a
 all 82 head columns) on your data during initialization, so other labs' probability scales can
 drift a little.
 
-Other knobs: `--steps` (default 8000 per config), `--lr` (default 0.004), `--configs` to train one
-config while iterating (pair it with `predict.py --configs <same>`), `--seed`, `--gpu`,
-`--backend`, and `--smoke` for a short wiring check that writes no checkpoint. Run `--smoke` first
-on a new dataset: it takes about a minute and catches every staging mistake.
+Other knobs: `--steps` (default 8000 per config), `--lr` (default 0.004), `--lr-schedule cosine`
+for a decay that would reach zero at `max(steps, 15000)` — the schedule the LOLO bundle used, so
+a default run ends near 45% of the peak rate — `--configs` to train one config while iterating
+(pair it with `predict.py --configs <same>`), `--from-weights` to warm-start from checkpoints you
+already trained rather than the published ones, `--seed`, `--gpu`, `--backend`, and `--smoke` for
+a short wiring check that writes no checkpoint. Run `--smoke` first on a new dataset: it takes
+about a minute and catches every staging mistake.
 
 **Time.** Live, every step re-runs the frozen trunk over a fresh batch of windows, which on one
 RTX A6000 costs about 0.5 s for the 15 fps config and 1 s for the 23 fps one. The default 8000

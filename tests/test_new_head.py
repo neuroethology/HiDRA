@@ -363,3 +363,64 @@ def test_seed_embedding_row_copies_the_donors_row_only():
     assert np.array_equal(out[key][untouched], flat[key][untouched])
     assert out[key] is not flat[key], "the input state must not be mutated"
     assert not np.array_equal(flat[key][di], flat[key][si])
+
+
+# ------------------------------------------------------------------ several donors
+
+def test_parse_seed_specs_takes_one_or_many():
+    assert H.parse_seed_specs(None) == []
+    assert H.parse_seed_specs("GroovyShrew") == [(DONOR, None)]
+    assert H.parse_seed_specs(["LyricalHare,attack", "GroovyShrew"]) == [SEED_FROM, (DONOR, None)]
+    assert H.parse_seed_specs("LyricalHare,attack;GroovyShrew") == [SEED_FROM, (DONOR, None)]
+
+
+def test_a_lone_donor_column_seeds_every_new_column():
+    """The "start from a similar behaviour" case: one donor column, whatever the new one is."""
+    table = schema.lab_action_table()
+    new_pairs = [(SLOT, "attack"), (SLOT, "mount")]
+    sources, unseeded = H.seed_sources(new_pairs, [SEED_FROM], table)
+    assert sources == {p: SEED_FROM for p in new_pairs} and unseeded == []
+
+
+def test_donor_columns_match_by_behaviour_when_several_are_given():
+    """The bundle's 'attack:NiftyGoldfinch,mount:ElegantMink'."""
+    table = schema.lab_action_table()
+    new_pairs = [(SLOT, "attack"), (SLOT, "mount")]
+    seeds = [("NiftyGoldfinch", "attack"), ("ElegantMink", "mount")]
+    sources, unseeded = H.seed_sources(new_pairs, seeds, table)
+    assert sources == {(SLOT, "attack"): ("NiftyGoldfinch", "attack"),
+                       (SLOT, "mount"): ("ElegantMink", "mount")}
+    assert unseeded == []
+    with pytest.raises(ValueError, match="matches no new column"):
+        H.seed_sources([(SLOT, "attack")], seeds, table)
+
+
+def test_a_donor_lab_is_a_base_that_columns_override():
+    table = schema.lab_action_table()
+    new_pairs = [(SLOT, "rear"), (SLOT, "sniffall"), (SLOT, "attack")]
+    # GroovyShrew has rear and sniffall but no attack; LyricalHare supplies attack.
+    sources, unseeded = H.seed_sources(new_pairs, [(DONOR, None), ("LyricalHare", "attack")], table)
+    assert sources == {(SLOT, "rear"): (DONOR, "rear"),
+                       (SLOT, "sniffall"): (DONOR, "sniffall"),
+                       (SLOT, "attack"): ("LyricalHare", "attack")}
+    assert unseeded == []
+    # Without the override, attack has no source and starts fresh.
+    sources, unseeded = H.seed_sources(new_pairs, [(DONOR, None)], table)
+    assert (SLOT, "attack") not in sources and unseeded == [(SLOT, "attack")]
+    # A named column beats a base donor for its own behaviour, in either order.
+    for seeds in ([("TranquilPanther", "rear"), (DONOR, None)],
+                  [(DONOR, None), ("TranquilPanther", "rear")]):
+        sources, _ = H.seed_sources(new_pairs, seeds, table)
+        assert sources[(SLOT, "rear")] == ("TranquilPanther", "rear"), seeds
+        assert sources[(SLOT, "sniffall")] == (DONOR, "sniffall"), seeds
+
+
+def test_seed_sources_validates_when_given_the_target_lab():
+    table = schema.lab_action_table()
+    new_pairs = [(SLOT, "rear")]
+    with pytest.raises(ValueError, match="not a lab with published heads"):
+        H.seed_sources(new_pairs, [("CalMS21_task1", None)], table, lab=SLOT)
+    with pytest.raises(ValueError, match="cannot donate to itself"):
+        H.seed_sources([(DONOR, "attack")], [(DONOR, None)], table, lab=DONOR)
+    # Unvalidated when no lab is passed, which is how the pure remap helpers use it.
+    assert H.seed_sources(new_pairs, [("CalMS21_task1", None)], table) == ({}, new_pairs)

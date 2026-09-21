@@ -24,6 +24,7 @@ pose ─▶ [ SSL trunk ]─▶[ feature merge ]─▶ x0 ─▶ + lab embedding
 | 5 | **Fine-tune `--mode head`** | ~2–3 annotated recordings | 258 numbers per behaviour | ~15 s cached, ~1 h live | [fine-tuning.md](fine-tuning.md) |
 | 6 | **Add a head column** (`--new-head`) | annotations for the new behaviour | +258 numbers per column | as (5) | [new-behaviours.md §4](new-behaviours.md) |
 | 7 | **Adopt a head-free slot as your lab** | as (6) | as (6), plus its embedding row | as (5) | [new-behaviours.md §4b](new-behaviours.md) |
+| 7b | **Another round on top of (5)–(7)** | more annotations | whatever that mode trains | ~10 s | [new-behaviours.md §4b](new-behaviours.md) |
 | 8 | **Fine-tune `--mode embedding`** | several recordings | 26.5k numbers | as (5) | [fine-tuning.md §3](fine-tuning.md#3-train) |
 | 9 | **Fine-tune `--mode tail`** | several recordings, ideally your own lab slot | 4.8M numbers | ~1–6 h | [fine-tuning.md §3](fine-tuning.md#3-train) |
 | 10 | **Retrain stage 2** | a corpus | merge + tail + both heads | 4–10 h × 5 configs, JAX | [training.md §3](training.md#3-stage-2-the-supervised-per-lab-tail-and-heads) |
@@ -73,8 +74,14 @@ predict.py --weights ... --configs 15fps_5bp
    ↓                             (seconds)
 look at the new calls, annotate where they are wrong
    ↓
-repeat
+repeat, with --from-weights pointing at the round you just trained
 ```
+
+`--from-weights 'ft_models/{config}__mylab.pkl'` warm-starts the next round from the last one
+instead of the published checkpoints, so each round builds on the previous rather than
+relitigating it — and a new behaviour can join partway through with `--new-head`. Measured on
+this machine, a second round that adds one behaviour in `head` mode on cached features: 4 s to
+compute the features, 6 s for 300 steps.
 
 Two things make that possible, and both are worth understanding before relying on it:
 
@@ -140,6 +147,52 @@ Extrapolated to the shipped defaults (8000 steps, five configs), `head` mode:
 `tail` mode is a different story: its 4.8M-parameter BiLSTM stack runs every step whatever
 you cache, so caching `x0` saves about 30% and no more. Reach for it when a linear readout
 genuinely is not enough, and budget hours.
+
+## Coming from the LOLO bundle
+
+`HiDRA_finetune.zip` — the pre-port research code plus `prepare_dataset.py` and its own
+`finetune.py`, used for the leave-one-lab-out experiments — describes the same new-lab
+workflow this repository now supports. Every knob it exposes has an equivalent here:
+
+| bundle | here |
+|---|---|
+| `prepare_dataset.py --pose-dir --annot-dir` | `prepare --tracking --annotations <folder>` (or one bout CSV) |
+| `--also-scored 'a,t,action;…'` | the same flag, on `prepare` |
+| `--lab <head-free slot>` | `--lab <slot> --new-head <slot>,<action>` (repeatable) |
+| `finetune.py --behaviors a,b` | one `--new-head` per behaviour, or `--actions` for existing heads |
+| `--seed-from attack:NiftyGoldfinch,mount:ElegantMink` | `--seed-from NiftyGoldfinch,attack --seed-from ElegantMink,mount` |
+| (no equivalent) | `--seed-from <DonorLab>`, which also seeds the lab-embedding row |
+| `--train-vids` | `--videos` (filenames, stems or ids) |
+| `--config` / `--all-configs` | `--configs` (default: all five) |
+| `--src <checkpoint>` | `--from-weights '<dir>/{config}__tag.pkl'` |
+| `LR_COSINE_T=max(steps,15000)`, set unconditionally | `--lr-schedule cosine` |
+| `--steps`, `--lr`, `--gpu`, `--tag`, `--dry-run` | the same flags |
+| the whole per-lab tail, always | `--mode tail` (or `head` / `embedding`) |
+| `inference_model/` symlink dir + `predict.py --model-dir --extra-heads` | `predict.py --weights '<dir>/{config}__tag.pkl'`; the checkpoint carries its own head table |
+| (no equivalent) | `--cache-features`, `--ddi-steps` |
+
+Two differences are deliberate rather than cosmetic:
+
+- **The bundle's new-lab workflow does not work as shipped.** Its wrapper sets `EXTRA_HEADS`
+  and `EXTRA_SEED`, which only the inference driver reads; the trainer never widens the head.
+  A run therefore reports success, logs `nll88: nan` on every step, and writes a checkpoint
+  with the published 82 columns and none for the new lab. `scratch/reproduce.sh` in a checkout
+  runs it side by side with the equivalent here, on the same data, and prints both outcomes.
+- **Where the columns are declared.** The bundle expected `--extra-heads` at inference time;
+  here the checkpoint carries its own `(lab, action)` table in a sidecar, so `predict.py
+  --weights` needs no extra flag and a checkpoint cannot be mis-routed.
+
+## Reusing the architecture rather than the weights
+
+One more route, which is neither inference nor fine-tuning: keep HiDRA's tail and per-lab
+heads exactly as they are and replace the *input representation* — the frozen trunk's
+features — with your own, then train tail and heads from scratch on both and compare. That is
+what `feature_swap_skeleton.py` in the LOLO bundle is for: a standalone PyTorch transcription
+of the tail (3 × BiLSTM + FFN, 256-d), the per-(lab, action) routing and the masked
+multi-label loss, with a `FeatureAdapter` where the trunk used to be. It shares no code with
+this repository and loads none of the published weights; it is a fair-comparison harness, not
+a way to reuse the trained model. Reach for it to answer "would my features do better than the
+self-supervised ones?", and for nothing else.
 
 ## What you cannot do
 

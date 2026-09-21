@@ -31,14 +31,28 @@ def test_check_actions_admits_only_the_declared_new_action():
 
 def test_resolve_new_heads_accepts_valid_pairs_and_seeds():
     hb = ft.heads_by_lab()
-    pairs, seed = ft.resolve_new_heads(["GroovyShrew,attack"], LAB, hb, "LyricalHare,attack")
-    assert pairs == [("GroovyShrew", "attack")] and seed == ("LyricalHare", "attack")
-    assert ft.resolve_new_heads([], LAB, hb) == ([], None)
+    pairs, seeds = ft.resolve_new_heads(["GroovyShrew,attack"], LAB, hb, ["LyricalHare,attack"])
+    assert pairs == [("GroovyShrew", "attack")] and seeds == [("LyricalHare", "attack")]
+    assert ft.resolve_new_heads([], LAB, hb) == ([], [])
     # Several columns at once, and a donor lab rather than one donor column.
-    pairs, seed = ft.resolve_new_heads(["GroovyShrew,attack", "GroovyShrew,mount"], LAB, hb,
-                                       "LyricalHare")
+    pairs, seeds = ft.resolve_new_heads(["GroovyShrew,attack", "GroovyShrew,mount"], LAB, hb,
+                                        ["LyricalHare"])
     assert pairs == [("GroovyShrew", "attack"), ("GroovyShrew", "mount")]
-    assert seed == ("LyricalHare", None)
+    assert seeds == [("LyricalHare", None)]
+    # A donor per behaviour -- the bundle's 'attack:NiftyGoldfinch,mount:ElegantMink'.
+    pairs, seeds = ft.resolve_new_heads(["GroovyShrew,attack", "GroovyShrew,mount"], LAB, hb,
+                                        ["NiftyGoldfinch,attack", "ElegantMink,mount"])
+    assert seeds == [("NiftyGoldfinch", "attack"), ("ElegantMink", "mount")]
+
+
+def test_a_donor_column_that_matches_no_new_behaviour_is_refused():
+    """Only when there are several entries: a lone donor column deliberately seeds whatever
+    the new column is, which is how "start from a similar behaviour" is expressed."""
+    hb = ft.heads_by_lab()
+    ft.resolve_new_heads(["GroovyShrew,attack"], LAB, hb, ["ElegantMink,mount"])   # allowed
+    with pytest.raises(SystemExit, match="matches no new column"):
+        ft.resolve_new_heads(["GroovyShrew,attack"], LAB, hb,
+                             ["ElegantMink,mount", "LyricalHare,attack"])
 
 
 @pytest.mark.parametrize("spec,seed,match", [
@@ -53,7 +67,7 @@ def test_resolve_new_heads_accepts_valid_pairs_and_seeds():
 ])
 def test_resolve_new_heads_refuses_with_a_reason(spec, seed, match):
     with pytest.raises(SystemExit, match=match):
-        ft.resolve_new_heads([spec], LAB, ft.heads_by_lab(), seed)
+        ft.resolve_new_heads([spec], LAB, ft.heads_by_lab(), [seed] if seed else None)
 
 
 def test_seed_from_without_new_head_is_an_error():
@@ -65,9 +79,10 @@ def test_a_head_free_slot_becomes_your_own_lab():
     """The zip's "reuse a head-free slot as your lab" workflow, validated here rather than
     silently producing a checkpoint with no column for it."""
     hb = ft.heads_by_lab()
-    pairs, seed = ft.resolve_new_heads(["CRIM13,rear", "CRIM13,attack"], "CRIM13", hb,
-                                       "GroovyShrew")
-    assert pairs == [("CRIM13", "rear"), ("CRIM13", "attack")] and seed == ("GroovyShrew", None)
+    pairs, seeds = ft.resolve_new_heads(["CRIM13,rear", "CRIM13,attack"], "CRIM13", hb,
+                                        ["GroovyShrew"])
+    assert pairs == [("CRIM13", "rear"), ("CRIM13", "attack")]
+    assert seeds == [("GroovyShrew", None)]
     # ... and its bouts stage, though the lab has no published head at all.
     annot = _annot(("rear", "self"), ("attack", "mouse2"))
     out = ft.check_actions(annot, "CRIM13", extra_actions=["rear", "attack"])

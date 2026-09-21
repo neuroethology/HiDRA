@@ -163,34 +163,37 @@ def suggested_actions(lab, annotated, hb):
 
 def resolve_new_heads(specs, lab, hb, seed_from=None):
     """Validate the `--new-head LAB,ACTION` flags (and `--seed-from`) for `lab`; returns
-    `([(lab, action), ...], seed_from_or_None)`. Exits with the reason on any problem.
+    `([(lab, action), ...], [(donor, action|None), ...])`. Exits with the reason on any problem.
 
     The column list new heads extend is the published one (`schema.lab_action_table()`,
     from models/thresholds.json); the thresholds CSV's heads are checked too, since that is
-    what `--list-heads` shows. `seed_from` is `LAB,ACTION` (one donor column for every new
-    head) or a bare `LAB` (each new column from that lab's column of the same action, and
-    the lab embedding row from that lab too).
+    what `--list-heads` shows. `seed_from` is one entry or several: `LAB,ACTION` names a
+    donor column, a bare `LAB` a donor lab (each new column from its column of the same
+    behaviour, and the lab embedding row from it too). `hidra.head_table.seed_sources` has
+    the rules for combining them.
     """
     if not specs:
         if seed_from:
             sys.exit("ERROR: --seed-from only makes sense together with --new-head")
-        return [], None
+        return [], []
     from . import schema
     try:
         pairs = head_table.parse_head_specs(specs)
-        seed = head_table.parse_seed_spec(seed_from) if seed_from else None
+        seeds = head_table.parse_seed_specs(seed_from)
         table = schema.lab_action_table()
         for pair in pairs:
             if pair[0] != lab:
                 raise ValueError(f"--new-head names lab {pair[0]!r} but --lab is {lab!r}; columns "
                                  f"are added under the lab whose data is staged")
-            head_table.validate_new_head(pair[0], pair[1], table, seed)
+            head_table.validate_new_head(pair[0], pair[1], table)
             if pair[1] in hb.get(lab, set()):
                 raise ValueError(f"({lab}, {pair[1]}) is already a head in the thresholds CSV; "
                                  f"fine-tune it with --actions {pair[1]} instead of --new-head")
+        # Resolving here as well as in the trainer catches a bad donor before a GPU is claimed.
+        head_table.seed_sources(pairs, seeds, table, lab=lab)
     except (ValueError, FileNotFoundError) as e:   # FileNotFoundError: no models/thresholds.json yet
         sys.exit(f"ERROR: {e}")
-    return pairs, seed
+    return pairs, seeds
 
 
 def norm_mouse(m):
@@ -205,9 +208,66 @@ def norm_mouse(m):
     sys.exit(f"ERROR: bad mouse id {m!r}; use mouse1..mouse4 or 'self'")
 
 
-def read_annotations(path, stop_inclusive=False):
-    """Load the bout CSV -> DataFrame[stem, agent, target, action, start_frame, stop_frame],
-    with stop_frame EXCLUSIVE and `stem` the tracking filename without its extension."""
+# The per-video annotation parquet the trainer itself reads, which is also what
+# `HiDRA_finetune.zip`'s `prepare_dataset.py` takes as input. Accepting it here means a
+# dataset already in that layout needs no conversion.
+BUNDLE_ANNOT_COLS = ["agent_id", "target_id", "action", "start_frame", "stop_frame"]
+
+
+def read_annotation_dir(path, by_stem=None):
+    """A directory of per-video annotation parquets -> the same frame `read_annotations`
+    returns. Each file is `<name>.parquet` with columns `agent_id, target_id, action,
+    start_frame, stop_frame` and `stop_frame` exclusive.
+
+    The file name identifies the recording. It matches a tracking file by stem, or by the
+    `video_id` that stem hashes to -- which is how the bundle names both sides, and the
+    only reason `by_stem` is needed here.
+    """
+    files = sorted(f for f in os.listdir(path) if f.endswith(".parquet"))
+    if not files:
+        sys.exit(f"ERROR: no .parquet annotation files in {path}")
+    by_vid = {str(hidra_predict.vid_of(p)): stem for stem, p in (by_stem or {}).items()}
+    frames, unmatched = [], []
+    for f in files:
+        name = os.path.splitext(f)[0]
+        stem = name if by_stem is None or name in by_stem else by_vid.get(name)
+        if stem is None:
+            unmatched.append(f)
+            continue
+        d = pd.read_parquet(os.path.join(path, f))
+        missing = [c for c in BUNDLE_ANNOT_COLS if c not in d.columns]
+        if missing:
+            sys.exit(f"ERROR: {os.path.join(path, f)} is missing column(s) {missing}. "
+                     f"A per-video annotation parquet needs {BUNDLE_ANNOT_COLS}.")
+        frames.append(pd.DataFrame(dict(
+            file=stem, stem=stem,
+            agent=[norm_mouse(m) for m in d["agent_id"]],
+            target=[norm_mouse(m) for m in d["target_id"]],
+            action=[str(a).strip() for a in d["action"]],
+            start_frame=d["start_frame"].astype(int).to_numpy(),
+            stop_frame=d["stop_frame"].astype(int).to_numpy())))
+    if unmatched:
+        sys.exit(f"ERROR: annotation file(s) {unmatched} match no tracking file by name or by "
+                 f"video id. Tracking stems: {sorted(by_stem or ())}")
+    return pd.concat(frames, ignore_index=True)[ANNOT_COLS + ["stem"]]
+
+
+def read_annotations(path, stop_inclusive=False, by_stem=None):
+    """Load the annotations -> DataFrame[stem, agent, target, action, start_frame, stop_frame],
+    with stop_frame EXCLUSIVE and `stem` the tracking filename without its extension.
+
+    `path` is the bout CSV, or a directory of per-video annotation parquets
+    (`read_annotation_dir`).
+    """
+    if os.path.isdir(path):
+        d = read_annotation_dir(path, by_stem)
+        if stop_inclusive:
+            d["stop_frame"] = d["stop_frame"] + 1
+        bad = d[d["stop_frame"] <= d["start_frame"]]
+        if len(bad):
+            sys.exit(f"ERROR: {len(bad)} bout(s) in {path} have stop_frame <= start_frame "
+                     f"(first: {bad.iloc[0].to_dict()}).")
+        return d
     d = pd.read_csv(path)
     low = {c.lower().strip(): c for c in d.columns}
     missing = [c for c in ANNOT_COLS if c not in low]
@@ -238,6 +298,11 @@ def check_actions(annot, lab, thr_csv=None, drop_unsupported=False, extra_action
                  f"one. Labs with heads: {sorted(hb)}; head-free slots you can adopt as your "
                  f"own lab with --new-head: {head_table.head_free_slots()}")
     mine = annotatable_actions(lab, hb) | set(extra_actions)
+    if "sniffall" in mine:
+        # Whether the merged head is published or being added by --new-head, the labels that
+        # feed it are the sniff family -- `annotatable_actions` only knows about the
+        # published case, so a new sniffall column needs the same admission here.
+        mine |= set(SNIFF_FAMILY)
     unsupported = sorted(set(annot["action"]) - mine)
     if unsupported:
         elsewhere = {a: sorted(l for l, acts in hb.items() if a in acts) for a in unsupported}
@@ -266,26 +331,67 @@ def check_actions(annot, lab, thr_csv=None, drop_unsupported=False, extra_action
 
 
 # ------------------------------------------------------------------ prepare
+def parse_also_scored(spec, allowed_actions):
+    """`--also-scored 'mouse1,mouse2,attack;mouse2,mouse1,attack'` -> [(agent, target, action)].
+
+    These are combinations every staged video *scored* even where it has no bout: without
+    them a video with zero bouts of a behaviour contributes nothing for it, and with them
+    every one of its frames is a negative. It is the bundle's flag of the same name, and it
+    is how "we watched for this and saw none" is expressed.
+    """
+    out, translated = [], 0
+    for tok in (t.strip() for t in str(spec or "").split(";") if t.strip()):
+        parts = [p.strip() for p in tok.split(",")]
+        if len(parts) != 3 or not all(parts):
+            sys.exit(f"ERROR: --also-scored {tok!r}: expected 'agent,target,action'")
+        agent, target, action = norm_mouse(parts[0]), norm_mouse(parts[1]), parts[2]
+        if action not in allowed_actions:
+            sys.exit(f"ERROR: --also-scored names action {action!r}, which is not one this lab "
+                     f"can train: {sorted(allowed_actions)}")
+        # Same translation `check_actions` applies to bout rows, and for the same reason: the
+        # trainer synthesizes the sniffall channel from the sniff family, so a combination
+        # recorded literally as `sniffall` would carry zero mask and score nothing.
+        if action == "sniffall":
+            action, translated = "sniff", translated + 1
+        out.append((agent, target, action))
+    if translated:
+        print(f"  note: staging {translated} --also-scored 'sniffall' combination(s) as 'sniff'")
+    return out
+
+
 def cmd_prepare(args):
     """Stage tracking parquets + bouts into {out}/TRAIN.csv + {out}/train_{tracking,annotation}/{lab}/."""
-    annot = read_annotations(args.annotations, args.stop_inclusive)
-    new_heads, _ = resolve_new_heads(args.new_head, args.lab, heads_by_lab(args.thresholds))
-    annot = check_actions(annot, args.lab, args.thresholds, args.drop_unsupported,
-                          extra_actions=[a for _, a in new_heads])
-
     parquets = hidra_predict.discover(args.tracking)
     if not parquets:
         sys.exit(f"no .parquet/.pkt files in {args.tracking}")
     by_stem = {os.path.splitext(os.path.basename(p))[0]: p for p in parquets}
+
+    hb = heads_by_lab(args.thresholds)
+    annot = read_annotations(args.annotations, args.stop_inclusive, by_stem)
+    new_heads, _ = resolve_new_heads(args.new_head, args.lab, hb)
+    new_actions = [a for _, a in new_heads]
+    annot = check_actions(annot, args.lab, args.thresholds, args.drop_unsupported,
+                          extra_actions=new_actions)
+    also_scored = parse_also_scored(args.also_scored,
+                                    annotatable_actions(args.lab, hb) | set(new_actions))
+
     unknown = sorted(set(annot["stem"]) - set(by_stem))
     if unknown:
         sys.exit(f"ERROR: annotated file(s) not found in {args.tracking}: {unknown}\n"
                  f"  tracking files present: {sorted(by_stem)}")
-    used = [by_stem[s] for s in sorted(set(annot["stem"]))]
-    skipped = sorted(set(by_stem) - set(annot["stem"]))
+    annotated_stems = set(annot["stem"])
+    # A video with no bouts is worth staging only when --also-scored says it was watched:
+    # then its frames are negatives. Otherwise it teaches the model nothing.
+    staged_stems = set(by_stem) if also_scored else annotated_stems
+    used = [by_stem[s] for s in sorted(staged_stems)]
+    skipped = sorted(set(by_stem) - staged_stems)
     if skipped:
         print(f"  note: {len(skipped)} tracking file(s) have no annotations and are NOT staged "
               f"(an unannotated video teaches the model nothing): {skipped}")
+    if also_scored:
+        empty = sorted(staged_stems - annotated_stems)
+        print(f"  --also-scored: {len(also_scored)} combination(s) marked scored in every staged "
+              f"video" + (f", including {len(empty)} with no bouts at all ({empty})" if empty else ""))
     meta = hidra_predict.load_metadata(args.tracking, used, args.pix_per_cm, args.fps)
 
     # bodypart-name validation needs the model schema (imports jax); skip it politely if the
@@ -337,7 +443,16 @@ def cmd_prepare(args):
         out_a.to_parquet(os.path.join(adir, f"{vid}.parquet"))
         # behaviors_labeled must list EVERY (agent, target, action) present in the annotations:
         # it is what marks a behaviour as supervised (and its non-bout frames as negatives).
-        labeled = sorted({f"{r.agent_id},{r.target_id},{r.action}" for r in out_a.itertuples()})
+        labeled = {f"{r.agent_id},{r.target_id},{r.action}" for r in out_a.itertuples()}
+        # --also-scored adds combinations this video watched for but recorded no bout of, so
+        # every frame of them becomes a negative. Skipped where a named mouse is not tracked.
+        for agent, target, action in also_scored:
+            if agent in mice and (target in mice or target == "self"):
+                labeled.add(f"{agent},{target},{action}")
+            else:
+                print(f"  note: {stem}: --also-scored {agent},{target},{action} skipped "
+                      f"(mouse not tracked; tracked: {sorted(mice)})")
+        labeled = sorted(labeled)
         pix, fps = meta[pq]
         rows.append(dict(lab_id=args.lab, video_id=vid, frames_per_second=fps,
                          pix_per_cm_approx=pix, num_frames=n_frames, file=os.path.basename(pq),
@@ -351,11 +466,11 @@ def cmd_prepare(args):
     # train.csv is what the trainers read; they copy TRAIN.csv over if it is absent,
     # but writing both keeps a re-prepared dataset from being shadowed by a stale train.csv.
     man.to_csv(os.path.join(args.out, "train.csv"), index=False)
-    staged = set(annot["action"])
+    staged = set(annot["action"]) | {a for _, _, a in also_scored}
     # One place decides what `prepare` suggests; --new-head adds its column to that list
     # rather than deriving a second one. Unioning before the `heads + opt_in` concatenation
     # keeps the opt-in last, and makes the suggestion non-empty whenever --new-head is given.
-    heads, opt_in = suggested_actions(args.lab, staged, heads_by_lab(args.thresholds))
+    heads, opt_in = suggested_actions(args.lab, staged, hb)
     extra = ""
     for lab_, action_ in new_heads:
         if not supervisable(action_, staged):
@@ -393,7 +508,7 @@ def cmd_train(args):
 
     from .download_models import require_weights
     require_weights()                      # warm-starting needs the base checkpoints
-    new_heads, seed_from = resolve_new_heads(args.new_head, args.lab, hb, args.seed_from)
+    new_heads, seeds = resolve_new_heads(args.new_head, args.lab, hb, args.seed_from)
     new_actions = [a for _, a in new_heads]
     if new_heads:
         if getattr(args, "backend", "torch") != "torch":
@@ -438,13 +553,15 @@ def cmd_train(args):
         sys.exit(f"ERROR: unknown config(s) {bad_cfg}; available: {CONFIGS}")
 
     out = os.path.abspath(args.out)
-    os.makedirs(out, exist_ok=True)
     workdir = args.workdir or f"/dev/shm/hidra_finetune_{args.lab}_{tag}"
-    if not args.reuse_cache:
-        # the tracking/label cache under workdir is keyed by video_id only, so a re-`prepare`d
-        # dataset would silently train on the OLD frames; rebuild it unless told otherwise.
-        shutil.rmtree(workdir, ignore_errors=True)
-    os.makedirs(workdir, exist_ok=True)
+    if not args.dry_run:                  # a dry run leaves the filesystem exactly as it was
+        os.makedirs(out, exist_ok=True)
+        if not args.reuse_cache:
+            # the tracking/label cache under workdir is keyed by video_id only, so a
+            # re-`prepare`d dataset would silently train on the OLD frames; rebuild it
+            # unless told otherwise.
+            shutil.rmtree(workdir, ignore_errors=True)
+        os.makedirs(workdir, exist_ok=True)
 
     # train_perlab_heads.py is driven entirely by env vars and asserts that the experiment
     # switches are mutually exclusive -- drop any left over in the caller's shell.
@@ -454,7 +571,8 @@ def cmd_train(args):
         "LABTAIL_HEAD_ONLY", "LABTAIL_EMB_ONLY", "LABTAIL_TUNE_MERGE", "LABTAIL_TRIM",
         "LABTAIL_VIDS", "LABTAIL_SRC", "CACHED_X0_DIR", "CACHED_PREMERGE_DIR", "SKIP_PATH",
         "FILM", "CORAL", "TRAJ_KEEP", "DONOR_LAB", "CURATE_ACTION", "CURATE_VIDS", "FND_TAG",
-        "LABTAIL_NEW_HEAD", "LABTAIL_SEED_FROM", "LABTAIL_CACHE", "LABTAIL_CACHE_PASSES"}}
+        "LABTAIL_NEW_HEAD", "LABTAIL_SEED_FROM", "LABTAIL_CACHE", "LABTAIL_CACHE_PASSES",
+        "LR_COSINE_T", "LR_FLOOR", "HIDRA_PERLAB_CKPT"}}
     env = dict(env,
                SNIFFALL="1",                          # canonical 82-column head layout (adds sniffall)
                HIDRA_DATA_DIR=os.path.abspath(args.data),
@@ -466,7 +584,11 @@ def cmd_train(args):
                FT_STEPS=str(args.steps),
                FT_LR=str(args.lr),
                CUDA_VISIBLE_DEVICES=str(args.gpu),
-               XLA_FLAGS="--xla_gpu_autotune_level=0",
+               # Deterministic ops on the JAX path, as the LOLO bundle set them, so a
+               # `--backend jax` fine-tune is reproducible. Ignored by the torch backend.
+               XLA_FLAGS="--xla_gpu_autotune_level=0"
+               + (" --xla_gpu_deterministic_ops=true"
+                  if getattr(args, "backend", "torch") == "jax" else ""),
                XLA_PYTHON_CLIENT_PREALLOCATE="false")
     if args.mode == "head":                           # train ONLY out-proj-perlab (frozen tail)
         env["LABTAIL_HEAD_ONLY"] = "1"
@@ -489,20 +611,35 @@ def cmd_train(args):
         env["LABTAIL_CACHE_PASSES"] = str(args.cache_passes)
         if getattr(args, "backend", "torch") != "torch":
             sys.exit("ERROR: --cache-features is a PyTorch-backend option; drop --backend jax")
+    if args.lr_schedule == "cosine":
+        # The bundle's schedule: a cosine from --lr that would reach its floor at
+        # max(steps, 15000), so a default 8000-step run ends around 45% of the peak rate.
+        env["LR_COSINE_T"] = str(max(args.steps, 15000))
+    src_tpl = None
+    if args.from_weights:                             # warm-start from something else
+        if "{config}" not in args.from_weights:
+            sys.exit("ERROR: --from-weights must contain a '{config}' placeholder, e.g. "
+                     "lolo_models/{config}__foundation.pkl")
+        src_tpl = os.path.abspath(args.from_weights)
+        absent = [c for c in configs if not os.path.isfile(src_tpl.format(config=c))]
+        if absent:
+            sys.exit(f"ERROR: --from-weights has no checkpoint for config(s) {absent} "
+                     f"({src_tpl})")
+        env["HIDRA_PERLAB_CKPT"] = src_tpl            # the torch trainer's warm-start source
+        print(f"  warm-starting from {args.from_weights} instead of the published checkpoints")
     if new_heads:                                     # widen the head (hidra.torch.train_perlab)
         env["LABTAIL_NEW_HEAD"] = ";".join(f"{l},{a}" for l, a in new_heads)
-        if seed_from:
-            env["LABTAIL_SEED_FROM"] = (seed_from[0] if seed_from[1] is None
-                                        else f"{seed_from[0]},{seed_from[1]}")
+        if seeds:
+            env["LABTAIL_SEED_FROM"] = ";".join(
+                d if a is None else f"{d},{a}" for d, a in seeds)
 
     print(f"fine-tuning {args.lab} {actions} (mode={args.mode}, steps={args.steps}, lr={args.lr}, "
           f"backend={getattr(args, 'backend', 'torch')}"
           f"{f', cached {args.cache_passes} pass(es)' if args.cache_features else ''}) "
           f"on {n_train} video(s)\n  -> {out}/{{config}}__{tag}.pkl")
     if new_heads:
-        how = ("fresh init" if not seed_from else
-               f"seeded from {seed_from[0]}" if seed_from[1] is None else
-               f"seeded from ({seed_from[0]}, {seed_from[1]})")
+        how = ("fresh init" if not seeds else "seeded from "
+               + ", ".join(d if a is None else f"{d} {a}" for d, a in seeds))
         print(f"  adding {len(new_heads)} NEW head column(s) "
               f"{[f'{l},{a}' for l, a in new_heads]}, {how}"
               f"; the checkpoint's column list is written to {out}/{{config}}__{tag}.heads.json")
@@ -513,6 +650,23 @@ def cmd_train(args):
         print("  note: mode=tail retrains the per-lab tail, which is SHARED across labs -- in the "
               f"resulting checkpoint only {args.lab} is meaningful, so always predict with "
               f"--labs {args.lab}.")
+    if args.dry_run:
+        # Everything above has validated the staged data, the heads, the donors and the
+        # checkpoints; this prints what would run and stops before claiming a GPU.
+        shown = ["HIDRA_DATA_DIR", "LABTAIL", "LABTAIL_ACTIONS", "LABTAIL_NEW_HEAD",
+                 "LABTAIL_SEED_FROM", "LABTAIL_HEAD_ONLY", "LABTAIL_EMB_ONLY", "LABTAIL_VIDS",
+                 "LABTAIL_CACHE", "LABTAIL_CACHE_PASSES", "LABTAIL_DDI_STEPS", "FT_STEPS",
+                 "FT_LR", "LR_COSINE_T", "HIDRA_PERLAB_CKPT", "LABTAIL_TAG", "LABTAIL_OUTDIR"]
+        module = ("hidra.torch.train_perlab" if getattr(args, "backend", "torch") == "torch"
+                  else "hidra.train_perlab_heads")
+        print("\n--dry-run: nothing was trained. Per config, this would run")
+        print("  " + " ".join(f"{k}={env[k]}" for k in shown if k in env))
+        for cfg in configs:
+            extra = f" LABTAIL_SRC={src_tpl.format(config=cfg)}" if src_tpl else ""
+            print(f"  [{cfg}]{extra} {sys.executable} -m {module} --config {cfg}"
+                  f"   -> {out}/{cfg}__{tag}.pkl")
+        return
+
     done, failed = [], []
     for i, cfg in enumerate(configs, 1):
         dest = os.path.join(out, f"{cfg}__{tag}.pkl")
@@ -525,7 +679,10 @@ def cmd_train(args):
         cmd = [sys.executable, "-m", module, "--config", cfg]
         if args.smoke:
             cmd.append("--smoke")
-        r = subprocess.run(cmd, env=env)
+        # LABTAIL_SRC is the JAX trainer's warm-start source and takes a concrete path, so
+        # the template is resolved per config here rather than once above.
+        env_cfg = dict(env, LABTAIL_SRC=src_tpl.format(config=cfg)) if src_tpl else env
+        r = subprocess.run(cmd, env=env_cfg)
         if r.returncode != 0 or (not args.smoke and not os.path.isfile(dest)):
             print(f"  WARNING: {cfg} exited {r.returncode} and left no checkpoint")
             failed.append(cfg)
@@ -687,7 +844,14 @@ def main():
     p = sub.add_parser("prepare", help="stage tracking parquets + a bout CSV for training",
                        formatter_class=argparse.RawDescriptionHelpFormatter, epilog=__doc__)
     p.add_argument("--tracking", required=True, help="folder of pose parquets (as for predict.py)")
-    p.add_argument("--annotations", required=True, help="bout CSV: file,agent,target,action,start_frame,stop_frame")
+    p.add_argument("--annotations", required=True,
+                   help="bout CSV (file,agent,target,action,start_frame,stop_frame), or a folder "
+                        "of per-video annotation parquets (agent_id,target_id,action,start_frame,"
+                        "stop_frame) named by tracking stem or video id")
+    p.add_argument("--also-scored", metavar="A,T,ACTION;...",
+                   help="(agent,target,action) combinations every staged video scored, even where "
+                        "it has no bout of them -- their frames become negatives. Staging then "
+                        "also includes tracking files with no annotations at all")
     p.add_argument("--lab", required=True, help="lab slot to adopt (see: python predict.py --list-heads)")
     p.add_argument("--out", default="ft_data", help="staging dir (default: ft_data)")
     p.add_argument("--pix-per-cm", type=float, help="pixels-per-cm for all files (metadata.csv rows override)")
@@ -728,6 +892,9 @@ def main():
                         "the staged data has not changed)")
     p.add_argument("--overwrite", action="store_true", help="retrain configs whose checkpoint already exists")
     p.add_argument("--smoke", action="store_true", help="600-step dry run, writes no checkpoint")
+    p.add_argument("--dry-run", action="store_true",
+                   help="validate the staged data, heads, donors and checkpoints, print the "
+                        "commands that would run, and stop without touching a GPU")
     p.add_argument("--thresholds", help="thresholds CSV defining the available heads (default: bundled)")
     p.add_argument("--backend", default="torch", choices=["torch", "jax"],
                    help="training backend: torch (default) or jax (the original). Both write the "
@@ -738,11 +905,20 @@ def main():
                         "repeatable). The published columns are copied over unchanged; the checkpoint "
                         "gets a {config}__{tag}.heads.json sidecar naming its columns. LAB may be a "
                         "head-free slot, which makes it your own lab (see docs/new-behaviours.md)")
-    p.add_argument("--seed-from", metavar="LAB[,ACTION]",
+    p.add_argument("--seed-from", metavar="LAB[,ACTION]", action="append",
                    help="with --new-head: where the new column(s) start instead of a fresh init. "
-                        "'LAB,ACTION' seeds every new column from that one existing head; a bare 'LAB' "
-                        "seeds each new column from that donor lab's column of the same action and its "
-                        "lab-embedding row from the donor too -- the new-lab recipe")
+                        "A bare 'LAB' is a donor lab -- each new column starts from that lab's column "
+                        "of the same behaviour, and the lab-embedding row from the donor too, which is "
+                        "the new-lab recipe. 'LAB,ACTION' names one donor column: given once it seeds "
+                        "every new column, and repeated it seeds the column of its own behaviour, so "
+                        "'--seed-from A --seed-from B,attack' means A for everything except attack")
+    p.add_argument("--from-weights", metavar="TEMPLATE",
+                   help="warm-start from these per-config checkpoints instead of the published ones "
+                        "(a '{config}' template, as predict.py --weights takes): a leave-one-lab-out "
+                        "foundation, or an earlier fine-tune you want to add behaviours to")
+    p.add_argument("--lr-schedule", choices=["constant", "cosine"], default="constant",
+                   help="constant --lr (default), or a cosine decay toward zero that would reach it "
+                        "at max(--steps, 15000) steps -- the schedule the LOLO bundle used")
     p.add_argument("--cache-features", action="store_true",
                    help="compute the frozen part of the model once per training window and fit the "
                         "trainable part on the cache. Same objective, far fewer seconds per step; the "

@@ -139,6 +139,43 @@ Two things differ from §4:
   the leave-one-lab-out experiments used. `--mode head` still works and is cheaper; §3b of
   [fine-tuning.md](fine-tuning.md) has the trade.
 
+### Choosing the donors
+
+`--seed-from` is repeatable, and two rules cover every case:
+
+```bash
+--seed-from GroovyShrew                       # one donor lab for every new column
+--seed-from LyricalHare,attack                # one donor column for every new column
+--seed-from NiftyGoldfinch,attack --seed-from ElegantMink,mount   # a donor per behaviour
+--seed-from GroovyShrew --seed-from LyricalHare,attack            # GroovyShrew, except attack
+```
+
+A lone `Lab,action` seeds **every** new column, which is the "start my new behaviour from a
+similar one" case. As soon as there is more than one entry, each `Lab,action` seeds the column
+of *its own* behaviour and each bare `Lab` is a base those columns override — in either order,
+so the last two lines above mean the same thing whichever way round you write them. Only a bare
+lab seeds the embedding row, because only a bare lab says "be like this lab".
+
+### Adding a behaviour later
+
+`--from-weights` warm-starts from checkpoints you already trained instead of the published
+ones, so a second round of annotation adds a column to what you have rather than starting over:
+
+```bash
+python finetune.py train --data ft_data/ --lab MABe22_keypoints \
+    --from-weights 'ft_models/{config}__mylab.pkl' \
+    --new-head MABe22_keypoints,approach --seed-from AdaptableSnail,approach \
+    --actions approach --mode head --cache-features --ddi-steps 0 \
+    --out ft_models_v2/ --tag plus_approach
+```
+
+The source checkpoint's own column list is what gets extended, so an 84-column fine-tune
+becomes an 85-column one with the first two columns untouched. `--actions approach` keeps the
+supervision on the new column alone. In `head` mode on cached features this is a ten-second
+round trip, which is what makes it worth doing per annotation batch rather than per project.
+`--from-weights` also takes a leave-one-lab-out foundation, if you have trained one
+([training.md](training.md#research-levers)).
+
 The checkpoint carries its own column list, so `predict.py --weights` runs the slot as a lab like
 any other and `--list-heads --weights` shows its behaviours. Without those weights the slot has
 no head and `predict.py --labs <slot>` refuses, which is the intended behaviour: nothing published

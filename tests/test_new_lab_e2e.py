@@ -151,3 +151,64 @@ def test_calibrate_writes_the_slots_rows(new_lab_run, track_dir, tmp_path):
     heads = set(rows[rows.columns[0]].astype(str))
     assert any(h.startswith(f"{SLOT}__") for h in heads), sorted(h for h in heads if SLOT in h)
     assert "GroovyShrew__rear" in heads, "uncalibrated heads must keep their published row"
+
+
+def test_a_later_round_adds_a_column_on_top_of_the_fine_tune(new_lab_run, track_dir, tmp_path):
+    """`--from-weights`: a second annotation round widens what you already trained.
+
+    The source checkpoint's own column list is what gets extended, so the first round's
+    columns survive and only the new one is supervised. This is the annotate-train-look loop,
+    and in `head` mode on cached features it is the cheap end of it.
+    """
+    from hidra import head_table as H
+
+    bouts = pd.read_csv(new_lab_run["bouts"])
+    extra = []
+    rng = np.random.default_rng(31)
+    for name in sorted(bouts["file"].unique()):
+        for a, b in (("mouse1", "mouse2"), ("mouse2", "mouse1")):
+            t = int(rng.integers(40, 120))
+            for _ in range(4):
+                dur = int(rng.integers(20, 50))
+                extra.append(dict(file=name, agent=a, target=b, action="approach",
+                                  start_frame=t, stop_frame=t + dur))
+                t += dur + int(rng.integers(90, 200))
+    bouts_v2 = tmp_path / "bouts_v2.csv"
+    pd.concat([bouts, pd.DataFrame(extra)], ignore_index=True).to_csv(bouts_v2, index=False)
+
+    staged, models = tmp_path / "ft_data", tmp_path / "ft_models"
+    new_head = [a for action in ACTIONS + ["approach"]
+                for a in ("--new-head", f"{SLOT},{action}")]
+    _run([os.path.join(REPO, "finetune.py"), "prepare", "--tracking", str(track_dir),
+          "--annotations", str(bouts_v2), "--lab", SLOT, *new_head, "--out", str(staged),
+          "--pix-per-cm", "16", "--fps", "30"])
+
+    stdout = _run([os.path.join(REPO, "finetune.py"), "train", "--data", str(staged),
+                   "--lab", SLOT, "--from-weights", new_lab_run["template"],
+                   "--new-head", f"{SLOT},approach", "--seed-from", "AdaptableSnail,approach",
+                   "--actions", "approach", "--mode", "head", "--cache-features",
+                   "--ddi-steps", "0", "--steps", "40", "--configs", CONFIG,
+                   "--eval-interval", "1000", "--out", str(models), "--tag", "v2",
+                   "--workdir", str(tmp_path / "work")])
+    assert "warm-starting from" in stdout, stdout[-3000:]
+    assert f"[NEW HEAD] ({SLOT}, approach)" in stdout and "of 85 (84 copied" in stdout, \
+        stdout[-3000:]
+    assert "supervising 1 head column(s): ['approach']" in stdout, stdout[-3000:]
+
+    ckpt = models / f"{CONFIG}__v2.pkl"
+    table = H.head_table_for(ckpt)
+    assert len(table) == 85
+    assert sorted(a for l, a in table if l == SLOT) == sorted(ACTIONS + ["approach"])
+
+    # The first round's columns are carried over untouched; only `approach` was trained.
+    from hidra.checkpoints import flatten_tree, load_flat_checkpoint
+
+    first = load_flat_checkpoint(new_lab_run["ckpt"])
+    first_table = H.head_table_for(new_lab_run["ckpt"])
+    with open(ckpt, "rb") as f:
+        second = flatten_tree(pickle.load(f))
+    w1, w2 = np.asarray(first["out-proj-perlab/w"]), np.asarray(second["out-proj-perlab/w"])
+    for i, pair in enumerate(first_table):
+        j = table.index(pair)
+        moved = np.abs(w2[:, j] - w1[:, i]).max() / max(np.abs(w1[:, i]).max(), 1e-30)
+        assert moved < 1e-5, f"round-one column {pair} moved by {moved:.2e}"

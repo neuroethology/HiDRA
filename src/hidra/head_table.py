@@ -109,19 +109,26 @@ def validate_new_head(lab, action, table, seed_from=None):
         raise ValueError(f"({lab}, {action}) already has a head column; fine-tune it with "
                          f"--actions {action} instead of --new-head")
     if seed_from is not None:
-        seed_from = tuple(seed_from)
-        if seed_from[1] is None:                       # a donor lab
-            donor_heads = sorted(a for l, a in table if l == seed_from[0])
-            if not donor_heads:
-                raise ValueError(f"--seed-from {seed_from[0]}: not a lab with published heads; labs "
-                                 f"with heads: {sorted({l for l, _ in table})}")
-            if seed_from[0] == lab:
-                raise ValueError(f"--seed-from {lab}: a lab cannot donate to itself")
-        elif seed_from not in set(table):
-            who = sorted(l for l, a in table if a == seed_from[1])
-            raise ValueError(f"--seed-from {seed_from[0]},{seed_from[1]} is not an existing head"
-                             + (f"; labs with a {seed_from[1]!r} head: {who}" if who else ""))
+        validate_seed(seed_from, lab, table)
     return lab, action
+
+
+def validate_seed(seed, lab, table):
+    """One `--seed-from` entry: `(donor, action)` naming an existing column, or
+    `(donor, None)` naming a donor lab whose same-named columns seed the new ones."""
+    table = as_pairs(table)
+    donor, action = tuple(seed)
+    if action is None:
+        if not any(l == donor for l, _ in table):
+            raise ValueError(f"--seed-from {donor}: not a lab with published heads; labs with "
+                             f"heads: {sorted({l for l, _ in table})}")
+        if donor == lab:
+            raise ValueError(f"--seed-from {lab}: a lab cannot donate to itself")
+    elif (donor, action) not in set(table):
+        who = sorted(l for l, a in table if a == action)
+        raise ValueError(f"--seed-from {donor},{action} is not an existing head"
+                         + (f"; labs with a {action!r} head: {who}" if who else ""))
+    return donor, action
 
 
 def parse_head_specs(spec):
@@ -144,26 +151,68 @@ def parse_seed_spec(spec):
     return parse_head_spec(spec)
 
 
-def seed_sources(new_pairs, seed_from, table):
-    """Which existing column seeds each new (lab, action): {new_pair: source_pair}.
+def parse_seed_specs(spec):
+    """Several `--seed-from` entries -> [(donor, action|None)]. A string splits on ';'."""
+    if spec is None:
+        return []
+    items = spec if isinstance(spec, (list, tuple)) else str(spec).split(";")
+    return [parse_seed_spec(s) for s in items if str(s).strip()]
 
-    `seed_from` = (lab, action) seeds every new column from that one head; (donor_lab, None)
-    seeds each new column from the donor's column of the same action, when it has one. New
-    columns without a source start from a fresh init. Returns also the list of new pairs the
-    donor could not seed."""
-    new_pairs, table = as_pairs(new_pairs), set(as_pairs(table))
+
+def _as_seed_list(seed_from):
+    """Normalise `seed_sources`' second argument: None, one `(donor, action)` pair, or a list."""
     if seed_from is None:
+        return []
+    if isinstance(seed_from, tuple) and len(seed_from) == 2 and not isinstance(seed_from[0], (list, tuple)):
+        return [seed_from]
+    return [tuple(s) for s in seed_from]
+
+
+def seed_sources(new_pairs, seed_from, table, lab=None):
+    """Which existing column seeds each new (lab, action): `({new_pair: source_pair}, unseeded)`.
+
+    `seed_from` is one entry or several (`parse_seed_specs`). Two rules cover every case:
+
+    * a lone `(donor, action)` entry seeds **every** new column from that one head — the
+      "start my new behaviour from a similar one" case, and what a single `--seed-from
+      Lab,action` has always meant;
+    * otherwise each `(donor, None)` entry is a base donor, matched to every new column by
+      action, and each `(donor, action)` entry names one column outright. A named column
+      always beats a base donor, whichever order they are written in, so `--seed-from
+      GroovyShrew --seed-from LyricalHare,attack` means "GroovyShrew for everything, except
+      attack" and so does the reverse. Within a kind, the later entry wins.
+
+    New columns left without a source start from a fresh init and come back in `unseeded`.
+    Passing `lab` validates the entries (`validate_seed`) as it goes.
+    """
+    new_pairs, table = as_pairs(new_pairs), set(as_pairs(table))
+    seeds = _as_seed_list(seed_from)
+    for s in seeds:
+        if lab is not None:
+            validate_seed(s, lab, table)
+    if not seeds:
         return {}, []
-    lab, action = tuple(seed_from)
-    if action is not None:
-        return {p: (lab, action) for p in new_pairs}, []
-    sources, unseeded = {}, []
+    if len(seeds) == 1 and seeds[0][1] is not None:
+        return {p: tuple(seeds[0]) for p in new_pairs}, []
+
+    by_action = {}
     for p in new_pairs:
-        if (lab, p[1]) in table:
-            sources[p] = (lab, p[1])
-        else:
-            unseeded.append(p)
-    return sources, unseeded
+        by_action.setdefault(p[1], []).append(p)
+    sources = {}
+    for donor, _ in [s for s in seeds if s[1] is None]:      # base donor labs, in order
+        for p in new_pairs:
+            if (donor, p[1]) in table:
+                sources[p] = (donor, p[1])
+    for donor, action in [s for s in seeds if s[1] is not None]:   # then the named columns
+        targets = by_action.get(action)
+        if not targets:
+            raise ValueError(f"--seed-from {donor},{action} matches no new column; the new "
+                             f"columns are {[f'{l},{a}' for l, a in new_pairs]}. With several "
+                             f"--seed-from entries each one seeds the column of its own "
+                             f"behaviour.")
+        for p in targets:
+            sources[p] = (donor, action)
+    return sources, [p for p in new_pairs if p not in sources]
 
 
 # ------------------------------------------------------------------ persistence
