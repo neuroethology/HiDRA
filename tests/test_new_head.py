@@ -67,8 +67,10 @@ def test_validate_new_head_explains_each_refusal():
     assert H.validate_new_head(*NEW, table, seed_from=SEED_FROM) == NEW
     with pytest.raises(ValueError, match="unknown lab"):
         H.validate_new_head("NoSuchLab", "attack", table)
-    with pytest.raises(ValueError, match="no published head"):
-        H.validate_new_head("CRIM13", "attack", table)          # a lab, but without heads
+    # A head-free slot is allowed: that is how a slot becomes the user's own lab.
+    assert H.validate_new_head("CRIM13", "attack", table) == ("CRIM13", "attack")
+    with pytest.raises(ValueError, match="cannot take a head"):
+        H.validate_new_head("MABe22_movies", "attack", table)   # its keypoints are unscrambled
     with pytest.raises(ValueError, match="not a behaviour in the vocabulary"):
         H.validate_new_head("GroovyShrew", "tailrattle", table)
     with pytest.raises(ValueError, match="not a behaviour in the vocabulary"):
@@ -282,3 +284,143 @@ def test_published_checkpoint_still_loads_at_82(config_name):
     assert H.load_head_table(path) is None
     head = load_perlab(config_name, build_unsupervised(config), path=path, config=config)
     assert head.n_heads == 82 and head.lab_action == schema.lab_action_table()
+
+
+# ------------------------------------------------------------------ your own lab
+
+SLOT = "CRIM13"          # a lab-embedding row with no published head column
+DONOR = "GroovyShrew"    # ... whose `rear` and `sniffall` heads can seed it
+
+
+def test_head_free_slots_are_the_labs_without_columns_minus_the_scrambled_one():
+    slots = H.head_free_slots()
+    table = schema.lab_action_table()
+    assert SLOT in slots and DONOR not in slots
+    assert "MABe22_movies" not in slots, "its bodyparts are permuted on load"
+    assert set(slots) | {l for l, _ in table} | {"MABe22_movies"} == set(schema.LABS.values)
+
+
+def test_parse_head_specs_and_seed_spec():
+    assert H.parse_head_specs("GroovyShrew,attack;GroovyShrew,mount") == [
+        ("GroovyShrew", "attack"), ("GroovyShrew", "mount")]
+    assert H.parse_head_specs(["GroovyShrew,attack"]) == [("GroovyShrew", "attack")]
+    assert H.parse_head_specs(None) == []
+    with pytest.raises(ValueError, match="twice"):
+        H.parse_head_specs("GroovyShrew,attack;GroovyShrew,attack")
+    # A bare lab name is a donor lab, not a malformed pair.
+    assert H.parse_seed_spec("GroovyShrew") == ("GroovyShrew", None)
+    assert H.parse_seed_spec("LyricalHare,attack") == SEED_FROM
+
+
+def test_seed_sources_matches_a_donor_labs_columns_by_action():
+    table = schema.lab_action_table()
+    new_pairs = [(SLOT, "rear"), (SLOT, "sniffall"), (SLOT, "intromit")]
+    sources, unseeded = H.seed_sources(new_pairs, (DONOR, None), table)
+    assert sources == {(SLOT, "rear"): (DONOR, "rear"),
+                       (SLOT, "sniffall"): (DONOR, "sniffall")}
+    assert unseeded == [(SLOT, "intromit")], "GroovyShrew has no intromit head to donate"
+    # One explicit column seeds every new head.
+    sources, unseeded = H.seed_sources(new_pairs, SEED_FROM, table)
+    assert set(sources.values()) == {SEED_FROM} and unseeded == []
+    assert H.seed_sources(new_pairs, None, table) == ({}, [])
+
+
+def test_validate_refuses_a_donor_that_cannot_donate():
+    table = schema.lab_action_table()
+    with pytest.raises(ValueError, match="not a lab with published heads"):
+        H.validate_new_head(SLOT, "rear", table, seed_from=(SLOT, None))
+    with pytest.raises(ValueError, match="cannot donate to itself"):
+        H.validate_new_head(DONOR, "intromit", table, seed_from=(DONOR, None))
+
+
+def test_remap_seeds_each_new_column_from_its_own_source():
+    old = schema.lab_action_table()
+    new_pairs = [(SLOT, "rear"), (SLOT, "sniffall")]
+    new = H.extend_table(old, new_pairs)
+    flat = _fake_flat(old)
+    sources, _ = H.seed_sources(new_pairs, (DONOR, None), old)
+    out, cols = H.remap_head_columns(flat, old, new, seed_from=sources, seed=3)
+
+    assert set(cols) == set(new_pairs) and out[W].shape == (256, 84)
+    for pair, src in sources.items():
+        i, j = old.index(src), cols[pair]
+        assert out[W][:, j].tobytes() == flat[W][:, i].tobytes(), pair
+        assert out[S][j] == flat[S][i] and out[B][j] == flat[B][i], pair
+    # Published columns still land by name.
+    for i, pair in enumerate(old):
+        assert out[W][:, new.index(pair)].tobytes() == flat[W][:, i].tobytes(), pair
+    with pytest.raises(ValueError, match="not a new column"):
+        H.remap_head_columns(flat, old, new, seed_from={SEED_FROM: SEED_FROM})
+
+
+def test_seed_embedding_row_copies_the_donors_row_only():
+    flat = _fake_flat(schema.lab_action_table())
+    out = H.seed_embedding_row(flat, SLOT, DONOR)
+    key = "lab-embedding/w"
+    si, di = schema.LABS.value_to_idx[DONOR], schema.LABS.value_to_idx[SLOT]
+    assert np.array_equal(out[key][di], flat[key][si])
+    untouched = [i for i in range(len(schema.LABS)) if i != di]
+    assert np.array_equal(out[key][untouched], flat[key][untouched])
+    assert out[key] is not flat[key], "the input state must not be mutated"
+    assert not np.array_equal(flat[key][di], flat[key][si])
+
+
+# ------------------------------------------------------------------ several donors
+
+def test_parse_seed_specs_takes_one_or_many():
+    assert H.parse_seed_specs(None) == []
+    assert H.parse_seed_specs("GroovyShrew") == [(DONOR, None)]
+    assert H.parse_seed_specs(["LyricalHare,attack", "GroovyShrew"]) == [SEED_FROM, (DONOR, None)]
+    assert H.parse_seed_specs("LyricalHare,attack;GroovyShrew") == [SEED_FROM, (DONOR, None)]
+
+
+def test_a_lone_donor_column_seeds_every_new_column():
+    """The "start from a similar behaviour" case: one donor column, whatever the new one is."""
+    table = schema.lab_action_table()
+    new_pairs = [(SLOT, "attack"), (SLOT, "mount")]
+    sources, unseeded = H.seed_sources(new_pairs, [SEED_FROM], table)
+    assert sources == {p: SEED_FROM for p in new_pairs} and unseeded == []
+
+
+def test_donor_columns_match_by_behaviour_when_several_are_given():
+    """The bundle's 'attack:NiftyGoldfinch,mount:ElegantMink'."""
+    table = schema.lab_action_table()
+    new_pairs = [(SLOT, "attack"), (SLOT, "mount")]
+    seeds = [("NiftyGoldfinch", "attack"), ("ElegantMink", "mount")]
+    sources, unseeded = H.seed_sources(new_pairs, seeds, table)
+    assert sources == {(SLOT, "attack"): ("NiftyGoldfinch", "attack"),
+                       (SLOT, "mount"): ("ElegantMink", "mount")}
+    assert unseeded == []
+    with pytest.raises(ValueError, match="matches no new column"):
+        H.seed_sources([(SLOT, "attack")], seeds, table)
+
+
+def test_a_donor_lab_is_a_base_that_columns_override():
+    table = schema.lab_action_table()
+    new_pairs = [(SLOT, "rear"), (SLOT, "sniffall"), (SLOT, "attack")]
+    # GroovyShrew has rear and sniffall but no attack; LyricalHare supplies attack.
+    sources, unseeded = H.seed_sources(new_pairs, [(DONOR, None), ("LyricalHare", "attack")], table)
+    assert sources == {(SLOT, "rear"): (DONOR, "rear"),
+                       (SLOT, "sniffall"): (DONOR, "sniffall"),
+                       (SLOT, "attack"): ("LyricalHare", "attack")}
+    assert unseeded == []
+    # Without the override, attack has no source and starts fresh.
+    sources, unseeded = H.seed_sources(new_pairs, [(DONOR, None)], table)
+    assert (SLOT, "attack") not in sources and unseeded == [(SLOT, "attack")]
+    # A named column beats a base donor for its own behaviour, in either order.
+    for seeds in ([("TranquilPanther", "rear"), (DONOR, None)],
+                  [(DONOR, None), ("TranquilPanther", "rear")]):
+        sources, _ = H.seed_sources(new_pairs, seeds, table)
+        assert sources[(SLOT, "rear")] == ("TranquilPanther", "rear"), seeds
+        assert sources[(SLOT, "sniffall")] == (DONOR, "sniffall"), seeds
+
+
+def test_seed_sources_validates_when_given_the_target_lab():
+    table = schema.lab_action_table()
+    new_pairs = [(SLOT, "rear")]
+    with pytest.raises(ValueError, match="not a lab with published heads"):
+        H.seed_sources(new_pairs, [("CalMS21_task1", None)], table, lab=SLOT)
+    with pytest.raises(ValueError, match="cannot donate to itself"):
+        H.seed_sources([(DONOR, "attack")], [(DONOR, None)], table, lab=DONOR)
+    # Unvalidated when no lab is passed, which is how the pure remap helpers use it.
+    assert H.seed_sources(new_pairs, [("CalMS21_task1", None)], table) == ({}, new_pairs)

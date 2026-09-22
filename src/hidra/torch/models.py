@@ -251,8 +251,12 @@ class MultiTaskPerLabModel(HidraModule):
         self.P.copy_(torch.as_tensor(np.asarray(P), dtype=torch.float32))
         return self
 
-    def trunk_feats(self, batch):
-        """Everything up to the output heads -> (batch, seq_len, d_res)."""
+    def merge_feats(self, batch):
+        """The frozen part of the supervised model: trunk -> feature merge -> `x0`,
+        (tsteps, batch, d_res). Lab-independent -- the lab embedding enters in
+        `tail_feats` -- so it can be computed once and cached when only the tail or the
+        head is being trained (`finetune.py train --cache-features`).
+        """
         L = self.layers
         xs = self.unsupervised_model.extract_features(batch)
         x = torch.cat(xs, dim=-1)
@@ -264,9 +268,17 @@ class MultiTaskPerLabModel(HidraModule):
         x = silu(x)
         x = L["ff-merge-out"](x)
         x = x.sum(dim=2)                      # pool over bodyparts
-        x = L["feat-flat-proj"](x)
+        return L["feat-flat-proj"](x)
 
-        x = x + 0.1 * L["lab-embedding"](batch["lab_id"])
+    def trunk_feats(self, batch):
+        """Everything up to the output heads -> (batch, seq_len, d_res)."""
+        return self.tail_feats(self.merge_feats(batch), batch["lab_id"])
+
+    def tail_feats(self, x, lab_id):
+        """The per-lab tail: `x0` (tsteps, batch, d_res) + lab embedding -> 3 x (BiLSTM + FFN)
+        -> crop the context padding -> (batch, seq_len, d_res)."""
+        L = self.layers
+        x = x + 0.1 * L["lab-embedding"](lab_id)
         for l in range(self.n_layers):
             y = L[f"lstm-{l}"](x)
             x = x + L[f"out-proj-{l}"](y)
@@ -294,9 +306,13 @@ class MultiTaskPerLabModel(HidraModule):
         Columns for actions this lab has no head for come out exactly zero, which is what
         makes `run_allbehaviors_perlab` able to filter by head afterwards.
         """
-        probs = torch.sigmoid(self.logits_perlab(batch))
+        return self.predict_from_feats(self.trunk_feats(batch), batch["lab_id"])
+
+    def predict_from_feats(self, x, lab_id):
+        """`predict`, from the penultimate features `trunk_feats` returns (or a cache of them)."""
+        probs = torch.sigmoid(self.layers["out-proj-perlab"](x))
         # Same clamping gather as the lab embedding: padding rows carry garbage lab ids.
-        Pb = self.P[jax_gather_index(batch["lab_id"], self.P.shape[0])]
+        Pb = self.P[jax_gather_index(lab_id, self.P.shape[0])]
         # jnp promotes a bfloat16-by-float32 einsum to float32; torch raises instead. In a
         # bfloat16 training run `probs` is bfloat16 while P is always float32, so promote
         # explicitly to keep the result -- and its dtype -- the same as the JAX path's.

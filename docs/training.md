@@ -212,14 +212,14 @@ is the map:
 | `LABTAIL_FRESH=1` | re-initialise the tail + head instead of warm-starting (cold start) |
 | `LABTAIL_SRC=<file>` | warm-start from a different checkpoint, e.g. a LOLO foundation |
 | `LABTAIL_TUNE_MERGE=1` | also fine-tune the feature merge (needs the live SSL path) |
-| `DONOR_LAB=<lab>` | seed the adopted lab's embedding row and head columns from a pose-similar lab |
+| `DONOR_LAB=<lab>` | seed the adopted lab's embedding row and head columns from a pose-similar lab — exposed on the PyTorch path as `finetune.py train --seed-from <DonorLab>` ([new-behaviours.md §4b](new-behaviours.md)) |
 | `CURATE_ACTION`, `CURATE_VIDS` | supervise one action only on the listed videos |
 | `LOLO_EXCLUDE=<lab>` | leave-one-lab-out foundation: full stage 2 with that lab removed |
 | `FROZEN_TRUNK=1` | warm-start everything, train only new head columns on frozen features — how `sniffall` was added |
 | `REFIT=<lab>,<action>` (+ `REFIT_VIDS`) | refit one existing column in place on a video subset |
 | `SCALE=<lab>,<action>` (+ `SCALE_VIDS`, `SCALE_TAG`) | data-size sweep: re-initialise one column and fit it on N videos |
 | `SKIP_PATH`, `FILM`, `CORAL`, `DISENTANGLE` | architectural experiments on the merge / lab-invariance |
-| `CACHED_X0_DIR`, `CACHED_PREMERGE_DIR` | train the tail on precomputed features, skipping the trunk |
+| `CACHED_X0_DIR`, `CACHED_PREMERGE_DIR` | train the tail on precomputed features, skipping the trunk — the PyTorch path does this in-process with `finetune.py train --cache-features`, at the head's features as well as at `x0` |
 | `FT_STEPS`, `FT_LR`, `LR_COSINE_T`, `LR_FLOOR`, `WEIGHT_DECAY`, `GRAD_CLIP` | optimizer schedule (defaults reproduce the published runs) |
 | `TRAJ_KEEP=N` | keep every evaluation checkpoint, disable early stopping |
 

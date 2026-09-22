@@ -86,9 +86,14 @@ def env_settings(config_name):
         "batch_size": int(os.environ.get("LABTAIL_BATCH", "128")),
         "dtype": os.environ.get("LABTAIL_DTYPE", "bfloat16"),
         "ddi_steps": int(os.environ.get("LABTAIL_DDI_STEPS", "256")),
-        # --new-head Lab,action / --seed-from Lab,action (finetune.py train): widen the head.
+        # --new-head Lab,action[;Lab,action...] / --seed-from Lab,action|Lab (finetune.py
+        # train): widen the head by those columns.
         "new_head": os.environ.get("LABTAIL_NEW_HEAD") or None,
         "seed_from": os.environ.get("LABTAIL_SEED_FROM") or None,
+        # --cache-features: compute the frozen layers once per window (T.FeatureCache) and
+        # train on the cache; --cache-passes augmentation draws per window.
+        "cache": env_flag("LABTAIL_CACHE"),
+        "cache_passes": int(os.environ.get("LABTAIL_CACHE_PASSES", "4")),
     }
 
 
@@ -149,7 +154,11 @@ def split_labtail_videos(videos, config, lab, video_ids=None):
 
     train_videos, val_videos = data.split_videos(
         videos, validation_frac=0.15, random_seed=config["split_seed"])
-    val_videos = [v for v in val_videos if v.lab_name not in schema.TRAIN_ONLY_LABS]
+    # The consortium's train-only labs have no scored heads, so foundation training drops
+    # them from validation. Not when one of them is the slot being adapted: then its
+    # held-out videos are the only validation there is.
+    val_videos = [v for v in val_videos
+                  if v.lab_name not in schema.TRAIN_ONLY_LABS or v.lab_name == lab]
 
     tr_ids = {int(v.video_id) for v in train_videos}
     va_ids = {int(v.video_id) for v in val_videos}
@@ -158,6 +167,14 @@ def split_labtail_videos(videos, config, lab, video_ids=None):
     val_videos = [v for v in pool if int(v.video_id) in va_ids]
     if video_ids:
         train_videos = [v for v in pool if int(v.video_id) in video_ids]
+    elif len(train_videos) < len(pool):
+        # The 85/15 split is seeded globally, so on a handful of staged videos it can put a
+        # whole recording on the validation side -- which on two videos means training on
+        # one of them. Never silently: say which, and how to override.
+        held = sorted(int(v.video_id) for v in pool if v not in train_videos)
+        print(f"[LABTAIL] the seeded 85/15 split holds {len(held)} of {len(pool)} staged "
+              f"video(s) out of TRAINING: {held}. Pass --videos to train on all of them.",
+              flush=True)
     if not val_videos:
         # Guarantee an eval signal even for a handful of videos; may overlap the train set,
         # as in the original. The metric is then optimistic -- calibrate on held-out data.
@@ -169,14 +186,18 @@ def split_labtail_videos(videos, config, lab, video_ids=None):
     return train_videos, val_videos
 
 
-def build_datasets(config, train_videos, val_videos):
-    """Train and validation datasets, with the original's augmentation settings."""
+def build_datasets(config, train_videos, val_videos, train_epochs=100000):
+    """Train and validation datasets, with the original's augmentation settings.
+
+    `train_epochs` is effectively endless for live training; the feature cache asks for
+    exactly as many epochs as augmentation draws it keeps per window.
+    """
     from .. import data
 
     common = dict(seq_len=64, sample_rate=config["sample_rate"], padding=32,
                   num_bodyparts=config["num_bodyparts"], unsupervised=False)
     train_dataset = data.Dataset(
-        videos=train_videos, num_epochs=100000, num_workers=8,
+        videos=train_videos, num_epochs=train_epochs, num_workers=8,
         seed=[0] + config["train_seed"],
         max_scale=config["max_scale"], max_time_dilation=config["max_time_dilation"],
         rotate=True, flip=True, noise_scale=config["noise_scale"], **common)
@@ -185,6 +206,15 @@ def build_datasets(config, train_videos, val_videos):
         rotate=False, flip=False, noise_scale=config["noise_scale"],
         num_workers=8, seed=[1] + config["train_seed"], **common)
     return train_dataset, val_dataset
+
+
+def numpy_batches(dataset, batch_size):
+    """The raw batched numpy dicts, before any device transfer. `FeatureCache.build` wants
+    these: it needs the per-window fields (`video_id`, `t_start`, ...) that the model itself
+    never sees, and does its own conversion for the ones it does."""
+    from .. import data
+
+    return data.batch(dataset.element_iterator(), batch_size)
 
 
 def torch_batches(dataset, batch_size, device):
@@ -277,11 +307,14 @@ def warm_start_head(settings, config, trunk, dtype, device):
     """The per-lab head, warm-started from `perlab_checkpoint_path` (the published checkpoint,
     or `$HIDRA_PERLAB_CKPT`). Returns (head, new_columns).
 
-    With `new_head` set the head is built one column wider than the source: the source's
-    columns are copied by name into their positions in the extended table
-    (`hidra.head_table.remap_head_columns`), and the new column starts from `seed_from`'s column
-    or a fresh init. Only `head` mode is allowed then -- the point of a new column is to fit
-    a linear readout on the lab's frozen, already-trained features, as sniffall was.
+    With `new_head` set the head is built wider than the source by those (lab, action)
+    columns: the source's columns are copied by name into their positions in the extended
+    table (`hidra.head_table.remap_head_columns`), and each new column starts from
+    `seed_from` -- an existing (lab, action) column, or a donor lab's column of the same
+    action, in which case the lab's embedding row is seeded from the donor too -- or from a
+    fresh init. Any mode may follow: `head` fits a linear readout on the lab's frozen,
+    already-trained features (how sniffall was added); `tail` re-trains the tail as well,
+    which is the new-lab adaptation recipe for a head-free slot.
     """
     from .. import head_table as H
     from ..checkpoints import load_flat_checkpoint
@@ -293,29 +326,45 @@ def warm_start_head(settings, config, trunk, dtype, device):
         return head, {}
 
     try:
-        lab, action = H.parse_head_spec(settings["new_head"])
-        seed_from = H.parse_head_spec(settings["seed_from"]) if settings["seed_from"] else None
-        if lab != settings["lab"]:
-            raise ValueError(f"LABTAIL_NEW_HEAD names lab {lab!r} but LABTAIL is {settings['lab']!r}")
-        if settings["mode"] != "head":
-            raise ValueError(f"a new head column is trained in mode=head only, not {settings['mode']}")
+        new_pairs = H.parse_head_specs(settings["new_head"])
+        seeds = H.parse_seed_specs(settings["seed_from"])
+        for lab, _action in new_pairs:
+            if lab != settings["lab"]:
+                raise ValueError(f"LABTAIL_NEW_HEAD names lab {lab!r} but LABTAIL is "
+                                 f"{settings['lab']!r}")
         old_table = H.head_table_for(src)
-        H.validate_new_head(lab, action, old_table, seed_from)
-        new_table = H.extend_table(old_table, [(lab, action)])
-        # Deterministic per (config, lab, action), so the five configs get different fresh
-        # draws but a re-run reproduces them.
-        seed = zlib.crc32(f"{name}:{lab}:{action}".encode())
+        new_table = old_table
+        for lab, action in new_pairs:              # validate against the table as it grows
+            H.validate_new_head(lab, action, new_table)
+            new_table = H.extend_table(new_table, [(lab, action)])
+        # Which existing column seeds each new one; the per-column line below reports the
+        # ones a donor lab could not cover, so the second return value is not needed here.
+        sources = H.seed_sources(new_pairs, seeds, old_table, lab=settings["lab"])[0]
+        # Deterministic per (config, columns), so the five configs get different fresh draws
+        # but a re-run reproduces them.
+        seed = zlib.crc32((f"{name}:" + ":".join(f"{l}:{a}" for l, a in new_pairs)).encode())
         flat, new_columns = H.remap_head_columns(load_flat_checkpoint(src), old_table, new_table,
-                                                 seed_from=seed_from, seed=seed)
+                                                 seed_from=sources or None, seed=seed)
+        # A bare `--seed-from <Lab>` says "be like this lab", which includes where the lab
+        # sits in embedding space; a `Lab,action` entry only speaks for one behaviour. With
+        # several base donors the last one wins, as it does for the columns.
+        base_donors = [d for d, a in seeds if a is None]
+        donor = base_donors[-1] if base_donors else None
+        if donor:
+            flat = H.seed_embedding_row(flat, settings["lab"], donor)
     except ValueError as e:
         sys.exit(f"ERROR: {e}")
 
     head = load_perlab(name, trunk, path=src, state=flat, lab_action=new_table, dtype=dtype,
                        device=device, config=config)
-    j = new_columns[(lab, action)]
-    how = f"seeded from ({seed_from[0]}, {seed_from[1]})" if seed_from else "fresh init"
-    print(f"[NEW HEAD] ({lab}, {action}) -> column {j} of {len(new_table)} "
-          f"({len(old_table)} copied from {os.path.basename(str(src))}); {how}", flush=True)
+    for pair in new_pairs:
+        how = (f"seeded from ({sources[pair][0]}, {sources[pair][1]})" if pair in sources
+               else "fresh init" + (f" -- {donor} has no {pair[1]!r} head" if donor else ""))
+        print(f"[NEW HEAD] ({pair[0]}, {pair[1]}) -> column {new_columns[pair]} of "
+              f"{len(new_table)} ({len(old_table)} copied from "
+              f"{os.path.basename(str(src))}); {how}", flush=True)
+    if donor:
+        print(f"[NEW HEAD] lab-embedding row of {settings['lab']} seeded from {donor}", flush=True)
     return head, new_columns
 
 
@@ -338,7 +387,12 @@ def finetune_config(settings, smoke=False, device=None):
     print(f"[LABTAIL {lab}] {len(train_videos)} train, {len(val_videos)} val video(s); "
           f"mode={mode} steps={settings['steps']} lr={settings['lr']}", flush=True)
 
-    train_dataset, _ = build_datasets(config, train_videos, val_videos)
+    # With --cache-features the training stream is finite: `cache_passes` augmentation draws
+    # of every window, computed once. Without it, it is the endless stream the original uses.
+    cache_level = T.FeatureCache.LEVELS[mode] if settings["cache"] else None
+    train_dataset, _ = build_datasets(
+        config, train_videos, val_videos,
+        train_epochs=settings["cache_passes"] if cache_level else 100000)
 
     # Warm start: every layer comes from the published checkpoint.
     trunk = load_unsupervised(settings["config_name"], dtype=dtype, device=device, config=config)
@@ -361,9 +415,14 @@ def finetune_config(settings, smoke=False, device=None):
     t0 = time.time()
     n_ddi = 0
     if ddi_steps:
+        # Its own endless stream: under --cache-features `train_dataset` yields only
+        # `cache_passes` epochs, which on a small dataset is fewer batches than the DDI
+        # pass wants, and a silently shortened recalibration would change the features.
+        ddi_dataset = (train_dataset if not cache_level
+                       else build_datasets(config, train_videos, val_videos)[0])
         head.set_stage("init", init_decay=0.99)
         with torch.no_grad():
-            for i, batch in enumerate(torch_batches(train_dataset, batch_size, device)):
+            for i, batch in enumerate(torch_batches(ddi_dataset, batch_size, device)):
                 T.ddi_forward(head, batch)
                 n_ddi = i + 1
                 if n_ddi >= ddi_steps:
@@ -379,14 +438,39 @@ def finetune_config(settings, smoke=False, device=None):
                             grad_clip=settings["grad_clip"])
 
     eval_fn = None if smoke else make_eval_fn(config, val_videos, device, batch_size)
+    loss_fn = None
+    train_batches = torch_batches(train_dataset, batch_size, device)
+    if cache_level:
+        # Everything frozen is a fixed function of the augmented window, so compute it once
+        # here and train on the result. Built AFTER the DDI pass, whose whole purpose is to
+        # move the input statistics these features are computed through.
+        t_cache = time.time()
+        cache = T.FeatureCache(cache_level).build(
+            head, numpy_batches(train_dataset, batch_size), device)
+        msg = (f"[CACHE] {cache.n} window(s) x {cache_level} "
+               f"({settings['cache_passes']} augmentation pass(es), {cache.nbytes / 1e6:.0f} MB) "
+               f"in {time.time() - t_cache:.0f}s")
+        train_batches = cache.train_batches(batch_size, device,
+                                            seed=(settings["seed"] or 0) + 17)
+        loss_fn = cache.loss_fn(columns)
+        if not smoke:
+            val_dataset = build_datasets(config, train_videos, val_videos)[1]
+            val_cache = T.FeatureCache(cache_level).build(
+                head, numpy_batches(val_dataset, batch_size), device, keep_elements=True)
+
+            def eval_fn(h, c=val_cache):
+                return c.evaluate(h, val_videos, batch_size, device)
+
+            msg += f"; {val_cache.n} validation window(s)"
+        print(msg, flush=True)
     ckpt_dir = os.path.join(str(paths.work_root()), "labtail",
                             f"{settings['config_name']}__{settings['tag']}", "checkpoints")
     tuner = T.FineTuner(
-        head, optimizer, torch_batches(train_dataset, batch_size, device),
+        head, optimizer, train_batches,
         eval_fn=eval_fn, ema_decay=settings["ema_decay"], checkpoint_dir=ckpt_dir,
         max_training_steps=steps, log_interval=min(settings["log_interval"], max(steps // 4, 1)),
         eval_interval=settings["eval_interval"], metric_name="f1", lower_is_better=False,
-        patience=10000, head_columns=columns, ddi_steps=0)
+        patience=10000, head_columns=columns, ddi_steps=0, loss_fn=loss_fn)
     # The EMA was seeded before DDI moved the statistics; re-seed so it starts from the
     # calibrated state rather than averaging across the recalibration.
     tuner.tracked = tuner._tracked_tensors()

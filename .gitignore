@@ -14,6 +14,9 @@ analysis_outputs/
 *.frames.parquet
 jobs.csv
 
+# Scratch: local working area -- reproductions, staged data, runs. Never committed.
+scratch/
+
 # Fine-tuning (finetune.py): staged data, checkpoints, predictions, calibrated thresholds
 ft_data/
 ft_models/

@@ -107,3 +107,81 @@ def test_sniff_subtype_only_offers_sniffall_as_an_opt_in():
     assert ft.suggested_actions(SNIFFALL_LAB, {"rear"}, hb) == (["rear"], [])
     # A plain-sniff lab has no sniffall column to offer.
     assert ft.suggested_actions(PLAIN_LAB, {"sniff"}, hb) == (["sniff"], [])
+
+
+# ------------------------------------------------------------------ the bundle's input forms
+
+def test_also_scored_parses_translates_and_validates():
+    """`--also-scored` marks combinations a video watched for but never saw. Its actions go
+    through the same sniffall translation as bout rows, or they would score nothing."""
+    allowed = ft.annotatable_actions(SNIFFALL_LAB, ft.heads_by_lab())
+    assert ft.parse_also_scored("mouse1,mouse2,sniffgenital", allowed) == [
+        ("mouse1", "mouse2", "sniffgenital")]
+    assert ft.parse_also_scored("1,2,sniffall;mouse2,self,rear", allowed) == [
+        ("mouse1", "mouse2", "sniff"), ("mouse2", "self", "rear")]
+    assert ft.parse_also_scored(None, allowed) == [] and ft.parse_also_scored("", allowed) == []
+    with pytest.raises(SystemExit, match="expected 'agent,target,action'"):
+        ft.parse_also_scored("mouse1,mouse2", allowed)
+    with pytest.raises(SystemExit, match="not one this lab can train"):
+        ft.parse_also_scored("mouse1,mouse2,tailrattle", allowed)
+
+
+def _bundle_annotation(path, rows):
+    pd.DataFrame([dict(agent_id=a, target_id=t, action=act, start_frame=s, stop_frame=e)
+                  for a, t, act, s, e in rows]).to_parquet(path)
+
+
+def test_read_annotation_dir_matches_by_stem_and_by_video_id(tmp_path):
+    """The bundle names its files by video_id and the repo by tracking stem; both resolve."""
+    from hidra.cli import vid_of
+
+    d = tmp_path / "annot"
+    d.mkdir()
+    by_stem = {"mouseA_day1": "/somewhere/mouseA_day1.parquet",
+               "mouseB_day1": "/somewhere/mouseB_day1.parquet"}
+    _bundle_annotation(d / "mouseA_day1.parquet", [("mouse1", "self", "rear", 10, 20)])
+    vid_b = vid_of(by_stem["mouseB_day1"])
+    _bundle_annotation(d / f"{vid_b}.parquet", [("mouse2", "mouse1", "sniff", 5, 9)])
+
+    out = ft.read_annotation_dir(str(d), by_stem)
+    assert sorted(out["stem"]) == ["mouseA_day1", "mouseB_day1"]
+    assert set(out["action"]) == {"rear", "sniff"}
+    assert out.loc[out["stem"] == "mouseA_day1", "target"].iloc[0] == "self"
+
+
+def test_read_annotation_dir_reports_what_it_cannot_place(tmp_path):
+    d = tmp_path / "annot"
+    d.mkdir()
+    _bundle_annotation(d / "nobody.parquet", [("mouse1", "self", "rear", 0, 5)])
+    with pytest.raises(SystemExit, match="match no tracking file"):
+        ft.read_annotation_dir(str(d), {"mouseA_day1": "/somewhere/mouseA_day1.parquet"})
+    pd.DataFrame([dict(agent_id="mouse1", start_frame=0)]).to_parquet(d / "mouseA_day1.parquet")
+    with pytest.raises(SystemExit, match="missing column"):
+        ft.read_annotation_dir(str(d), {"mouseA_day1": "/somewhere/mouseA_day1.parquet",
+                                        "nobody": "/somewhere/nobody.parquet"})
+
+
+def test_read_annotations_dispatches_on_a_directory(tmp_path):
+    d = tmp_path / "annot"
+    d.mkdir()
+    _bundle_annotation(d / "v.parquet", [("mouse1", "self", "rear", 10, 20)])
+    by_stem = {"v": "/somewhere/v.parquet"}
+    excl = ft.read_annotations(str(d), by_stem=by_stem)
+    incl = ft.read_annotations(str(d), stop_inclusive=True, by_stem=by_stem)
+    assert excl.loc[0, "stop_frame"] == 20 and incl.loc[0, "stop_frame"] == 21
+
+
+def test_a_new_sniffall_column_accepts_the_sniff_family():
+    """A head-free slot given a `sniffall` column has no published heads at all, so the
+    family that feeds the merged channel has to be admitted from `--new-head` as well --
+    otherwise the only label it would take is the one that supervises nothing."""
+    slot = "CRIM13"
+    for label in ["sniff", *ft.SNIFF_FAMILY]:
+        out = ft.check_actions(_annot((label, "mouse2")), slot, extra_actions=["sniffall"])
+        assert len(out) == 1
+    # `sniffall` itself is still translated to the family member the trainer reads.
+    assert list(ft.check_actions(_annot(("sniffall", "mouse2")), slot,
+                                 extra_actions=["sniffall"])["action"]) == ["sniff"]
+    # Without a sniffall column there is nothing to feed, so the family is not admitted.
+    with pytest.raises(SystemExit, match="no head for"):
+        ft.check_actions(_annot(("sniffbody", "mouse2")), slot, extra_actions=["rear"])

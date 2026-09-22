@@ -11,11 +11,17 @@ Four things you can do with it, cheapest first:
   (lab, behaviour) classifier heads and run it on your videos: `predict.py`.
 - **[Fine-tuning](docs/fine-tuning.md)** — you have some annotations. Adapt the head you picked to
   your arena, pose rig and annotation style, then re-calibrate its threshold: `finetune.py`.
+  `--cache-features` makes a single-config round trip take seconds rather than an hour, which is
+  what makes an annotate-train-look loop practical.
 - **[Adding a behaviour](docs/new-behaviours.md)** — the behaviour you want has no head, or not
-  under the lab you want. Adopt another lab's head, or give your lab a new head column with
-  `finetune.py train --new-head Lab,action` and train it on your annotations.
+  under the lab you want. Adopt another lab's head, give your lab a new head column with
+  `finetune.py train --new-head Lab,action`, or claim one of the head-free lab slots and make it
+  your own lab.
 - **[Training from scratch](docs/training.md)** — rebuild the self-supervised trunk and/or the
   supervised per-lab tail with the research code that produced the published weights.
+
+**[docs/reuse.md](docs/reuse.md)** puts all of these side by side — what each one costs, how much
+annotation it needs, and how to pick.
 
 There is also a small Python API in [`src/hidra/__init__.py`](src/hidra/__init__.py)
 for notebook use: `import hidra`.
@@ -232,7 +238,9 @@ translates into the labels the trainer derives it from. `train` takes `--backend
 (default `torch`); either writes the checkpoint in the same layout, `predict.py --weights` loads
 it on either backend, and `hidra-convert-weights --one` turns it into safetensors. You adopt an
 existing (lab, behaviour) head; for anything else see [docs/new-behaviours.md](docs/new-behaviours.md).
-Full walkthrough and caveats: **[docs/fine-tuning.md](docs/fine-tuning.md)**.
+Add `--cache-features` (and, while iterating, `--ddi-steps 0 --configs 15fps_5bp`) to turn a
+`--mode head` run from an hour per config into seconds. Full walkthrough and caveats:
+**[docs/fine-tuning.md](docs/fine-tuning.md)**.
 
 ## Training from scratch
 
@@ -283,6 +291,7 @@ src/hidra/
 
 reference/                       # the pre-port JAX implementation, byte-identical, runnable
 tests/                           # JAX-vs-PyTorch exactness suite + CLI tests
+docs/reuse.md                    # every way to reuse the model, with measured costs
 docs/zero-shot.md docs/fine-tuning.md docs/new-behaviours.md docs/training.md docs/pytorch-port.md
 models/                          # 5x backbone + 5x per-lab head + thresholds.json (~660 MB,
                                  #   NOT in git -- see "Model weights" above)
