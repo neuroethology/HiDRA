@@ -165,7 +165,8 @@ workflow this repository now supports. Every knob it exposes has an equivalent h
 | `--train-vids` | `--videos` (filenames, stems or ids) |
 | `--config` / `--all-configs` | `--configs` (default: all five) |
 | `--src <checkpoint>` | `--from-weights '<dir>/{config}__tag.pkl'` |
-| `LR_COSINE_T=max(steps,15000)`, set unconditionally | `--lr-schedule cosine` |
+| `LR_COSINE_T=max(steps,15000)`, set unconditionally | `--lr-schedule cosine` (`--cosine-steps N` moves the horizon) |
+| early-stopping patience 10000, hard-coded | `--patience N` (default 10000; `0` = never) |
 | `--steps`, `--lr`, `--gpu`, `--tag`, `--dry-run` | the same flags |
 | the whole per-lab tail, always | `--mode tail` (or `head` / `embedding`) |
 | `inference_model/` symlink dir + `predict.py --model-dir --extra-heads` | `predict.py --weights '<dir>/{config}__tag.pkl'`; the checkpoint carries its own head table |

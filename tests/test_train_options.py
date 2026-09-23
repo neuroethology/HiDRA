@@ -1,4 +1,5 @@
-"""`finetune.py train`'s planning-time options: `--dry-run`, `--from-weights`, `--lr-schedule`.
+"""`finetune.py train`'s planning-time options: `--dry-run`, `--from-weights`, `--lr-schedule`,
+`--cosine-steps`, `--patience`.
 
 All of these are decided before a GPU is touched, so they can be checked by running the
 command and reading the plan it prints. `--dry-run` is also the thing that makes that
@@ -74,6 +75,21 @@ def test_lr_schedule_cosine_sets_the_bundles_horizon(staged):
     assert "LR_COSINE_T=15000" in _plan(staged, "--seed-from", DONOR, "--lr-schedule", "cosine")
     assert "LR_COSINE_T=20000" in _plan(staged, "--seed-from", DONOR, "--lr-schedule", "cosine",
                                         "--steps", "20000")
+
+
+def test_cosine_steps_moves_the_horizon(staged):
+    # the same number as --steps is a schedule that decays fully over the run
+    assert "LR_COSINE_T=1000" in _plan(staged, "--seed-from", DONOR, "--lr-schedule", "cosine",
+                                       "--steps", "1000", "--cosine-steps", "1000")
+    out = _plan(staged, "--seed-from", DONOR, "--cosine-steps", "1000", expect=1)
+    assert "--cosine-steps only applies with --lr-schedule cosine" in out
+
+
+def test_patience_reaches_the_trainer(staged):
+    assert "LABTAIL_PATIENCE" not in _plan(staged, "--seed-from", DONOR)   # the trainer's 10000
+    assert "LABTAIL_PATIENCE=0" in _plan(staged, "--seed-from", DONOR, "--patience", "0")
+    out = _plan(staged, "--seed-from", DONOR, "--patience", "-1", expect=1)
+    assert "--patience must be >= 0" in out
 
 
 def test_from_weights_is_checked_before_anything_runs(staged, tmp_path):

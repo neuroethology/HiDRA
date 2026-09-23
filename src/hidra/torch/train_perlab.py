@@ -81,6 +81,8 @@ def env_settings(config_name):
         "video_ids": {int(v) for v in os.environ.get("LABTAIL_VIDS", "").split(",") if v.strip()},
         "seed": int(os.environ["LABTAIL_SEED"]) if os.environ.get("LABTAIL_SEED") else None,
         "eval_interval": int(os.environ.get("LABTAIL_EVAL_INTERVAL", "500")),
+        # --patience: steps with no validation gain before a config stops; 0 = never
+        "patience": int(os.environ.get("LABTAIL_PATIENCE", "10000")),
         "log_interval": int(os.environ.get("LABTAIL_LOG_INTERVAL", "500")),
         "ema_decay": float(os.environ.get("LABTAIL_EMA", "0.9993")),
         "batch_size": int(os.environ.get("LABTAIL_BATCH", "128")),
@@ -470,7 +472,10 @@ def finetune_config(settings, smoke=False, device=None):
         eval_fn=eval_fn, ema_decay=settings["ema_decay"], checkpoint_dir=ckpt_dir,
         max_training_steps=steps, log_interval=min(settings["log_interval"], max(steps // 4, 1)),
         eval_interval=settings["eval_interval"], metric_name="f1", lower_is_better=False,
-        patience=10000, head_columns=columns, ddi_steps=0, loss_fn=loss_fn)
+        patience=settings["patience"] or None, head_columns=columns, ddi_steps=0, loss_fn=loss_fn)
+    p = tuner.checkpoints.patience
+    print(f"[LABTAIL {lab}] early stopping: "
+          + (f"after {p} step(s) without a validation gain" if p else "off"), flush=True)
     # The EMA was seeded before DDI moved the statistics; re-seed so it starts from the
     # calibrated state rather than averaging across the recalibration.
     tuner.tracked = tuner._tracked_tensors()

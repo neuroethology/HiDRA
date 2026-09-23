@@ -145,6 +145,24 @@ def test_checkpoint_manager_keeps_best_and_stops_on_patience(tmp_path):
     assert 100 in kept, "the best-scoring checkpoint was evicted"
 
 
+def test_patience_zero_turns_early_stopping_off(tmp_path, monkeypatch):
+    """`finetune.py --patience 0` sets LABTAIL_PATIENCE=0, and the fine-tuner then gets no
+    patience at all: a config runs its full --steps however flat validation goes."""
+    from hidra.torch.train import CheckpointManager
+    from hidra.torch.train_perlab import env_settings
+
+    monkeypatch.setenv("LABTAIL", "NiftyGoldfinch")
+    monkeypatch.delenv("LABTAIL_PATIENCE", raising=False)
+    assert env_settings("15fps_5bp")["patience"] == 10000
+    monkeypatch.setenv("LABTAIL_PATIENCE", "0")
+    patience = env_settings("15fps_5bp")["patience"] or None   # as finetune_config passes it
+    cm = CheckpointManager(str(tmp_path), metric_name="f1", lower_is_better=False,
+                           patience=patience)
+    state = {"w": torch.zeros(2)}
+    assert cm.update(state, 0, {"f1": 0.9}) is False
+    assert cm.update(state, 10**6, {"f1": 0.1}) is False
+
+
 def test_checkpoint_manager_rejects_nan(tmp_path):
     """A NaN metric means the run diverged; silently keeping going wastes hours."""
     from hidra.torch.train import CheckpointManager
