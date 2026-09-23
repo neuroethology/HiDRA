@@ -187,7 +187,9 @@ if LOLO_EXCLUDE:
 #   LABTAIL_FRESH=1 = re-initialise the tail+head instead of warm-starting (cold-start / Exp 1).
 #   LABTAIL_SRC   = model file to warm-start from (default canonical _perlab_sniffall).
 #   LABTAIL_TAG   = unique suffix for ckpt/output.
+#   LABTAIL_PATIENCE = early-stopping patience in steps (default 10000); 0 = never stop early.
 LABTAIL = os.environ.get("LABTAIL")
+LABTAIL_PATIENCE = int(os.environ.get("LABTAIL_PATIENCE", "10000"))
 # SKIP_PATH=1: give the tail a trainable low-rank view of the PRE-merge SSL features (skip path #3b).
 # The shared supervised feature-merge deletes lab information (it never saw the new lab). A fresh
 # low-rank projection skip-proj-in (2*feat_dim -> SKIP_RANK, per-node) -> sum over nodes -> skip-proj-out
@@ -908,8 +910,10 @@ def train_perlab(config, smoke=False):
         # SNIFFALL_SCRATCH: predict() only fills the sniffall action, which is NOT in the val
         # videos' scored behaviours -> logged val-f1 is ~0 and flat. Disable early stop (huge
         # patience) and save EMA-last instead of best.pkl (below), like the FROZEN_TRUNK path.
+        # LABTAIL_PATIENCE (finetune.py --patience): 0 turns early stopping off.
         early_stopping_config={"metric_name": "f1", "lower_is_better": False,
-                               "patience": 10**9 if (SNIFFALL_SCRATCH or REFIT) else 10000},
+                               "patience": 10**9 if (SNIFFALL_SCRATCH or REFIT or LABTAIL_PATIENCE == 0)
+                               else LABTAIL_PATIENCE},
         max_training_steps=600 if smoke else (FT_STEPS if (FROZEN_TRUNK or REFIT or LABTAIL or DISENTANGLE) else (SCRATCH_STEPS if SNIFFALL_SCRATCH else 50000)))
     # Run UNSHARDED (single GPU per process). The Trainer sets up a 1-device
     # batch mesh, but under this JAX version that triggers a sharding-broadcast

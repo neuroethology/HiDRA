@@ -572,6 +572,7 @@ def cmd_train(args):
         "LABTAIL_VIDS", "LABTAIL_SRC", "CACHED_X0_DIR", "CACHED_PREMERGE_DIR", "SKIP_PATH",
         "FILM", "CORAL", "TRAJ_KEEP", "DONOR_LAB", "CURATE_ACTION", "CURATE_VIDS", "FND_TAG",
         "LABTAIL_NEW_HEAD", "LABTAIL_SEED_FROM", "LABTAIL_CACHE", "LABTAIL_CACHE_PASSES",
+        "LABTAIL_PATIENCE",
         "LR_COSINE_T", "LR_FLOOR", "HIDRA_PERLAB_CKPT"}}
     env = dict(env,
                SNIFFALL="1",                          # canonical 82-column head layout (adds sniffall)
@@ -604,6 +605,10 @@ def cmd_train(args):
         env["LABTAIL_SEED"] = str(args.seed)
     if args.eval_interval:
         env["LABTAIL_EVAL_INTERVAL"] = str(args.eval_interval)
+    if args.patience is not None:
+        if args.patience < 0:
+            sys.exit("ERROR: --patience must be >= 0 (0 turns early stopping off)")
+        env["LABTAIL_PATIENCE"] = str(args.patience)
     if args.ddi_steps is not None:
         env["LABTAIL_DDI_STEPS"] = str(args.ddi_steps)
     if args.cache_features:                           # train on cached frozen features
@@ -611,10 +616,16 @@ def cmd_train(args):
         env["LABTAIL_CACHE_PASSES"] = str(args.cache_passes)
         if getattr(args, "backend", "torch") != "torch":
             sys.exit("ERROR: --cache-features is a PyTorch-backend option; drop --backend jax")
+    if args.cosine_steps is not None:
+        if args.lr_schedule != "cosine":
+            sys.exit("ERROR: --cosine-steps only applies with --lr-schedule cosine")
+        if args.cosine_steps < 1:
+            sys.exit("ERROR: --cosine-steps must be >= 1")
     if args.lr_schedule == "cosine":
         # The bundle's schedule: a cosine from --lr that would reach its floor at
         # max(steps, 15000), so a default 8000-step run ends around 45% of the peak rate.
-        env["LR_COSINE_T"] = str(max(args.steps, 15000))
+        # --cosine-steps moves that point; --cosine-steps <same as --steps> decays fully.
+        env["LR_COSINE_T"] = str(args.cosine_steps or max(args.steps, 15000))
     src_tpl = None
     if args.from_weights:                             # warm-start from something else
         if "{config}" not in args.from_weights:
@@ -656,7 +667,8 @@ def cmd_train(args):
         shown = ["HIDRA_DATA_DIR", "LABTAIL", "LABTAIL_ACTIONS", "LABTAIL_NEW_HEAD",
                  "LABTAIL_SEED_FROM", "LABTAIL_HEAD_ONLY", "LABTAIL_EMB_ONLY", "LABTAIL_VIDS",
                  "LABTAIL_CACHE", "LABTAIL_CACHE_PASSES", "LABTAIL_DDI_STEPS", "FT_STEPS",
-                 "FT_LR", "LR_COSINE_T", "HIDRA_PERLAB_CKPT", "LABTAIL_TAG", "LABTAIL_OUTDIR"]
+                 "FT_LR", "LR_COSINE_T", "LABTAIL_PATIENCE", "HIDRA_PERLAB_CKPT", "LABTAIL_TAG",
+                 "LABTAIL_OUTDIR"]
         module = ("hidra.torch.train_perlab" if getattr(args, "backend", "torch") == "torch"
                   else "hidra.train_perlab_heads")
         print("\n--dry-run: nothing was trained. Per config, this would run")
@@ -886,6 +898,11 @@ def main():
     p.add_argument("--gpu", default="0", help="CUDA device index (default 0)")
     p.add_argument("--seed", type=int, help="training seed (data order + augmentation)")
     p.add_argument("--eval-interval", type=int, help="steps between validation passes")
+    p.add_argument("--patience", type=int, metavar="N",
+                   help="stop a config early once N steps pass with no gain in validation F1 "
+                        "(default 10000, as the LOLO bundle; 0 = never, so every config runs "
+                        "--steps). Validation is the seeded split's held-out video(s), which "
+                        "--videos can also put on the training side")
     p.add_argument("--workdir", help="scratch dir for the tracking cache (default: /dev/shm/hidra_finetune_*)")
     p.add_argument("--reuse-cache", action="store_true",
                    help="keep the scratch tracking cache from a previous run (faster; only safe if "
@@ -918,7 +935,12 @@ def main():
                         "foundation, or an earlier fine-tune you want to add behaviours to")
     p.add_argument("--lr-schedule", choices=["constant", "cosine"], default="constant",
                    help="constant --lr (default), or a cosine decay toward zero that would reach it "
-                        "at max(--steps, 15000) steps -- the schedule the LOLO bundle used")
+                        "at max(--steps, 15000) steps -- the schedule the LOLO bundle used, under "
+                        "which a run shorter than 15000 steps ends partway down (see --cosine-steps)")
+    p.add_argument("--cosine-steps", type=int, metavar="N",
+                   help="with --lr-schedule cosine: the step at which the decay reaches zero "
+                        "(default max(--steps, 15000)). Pass the same number as --steps for a "
+                        "schedule that decays fully over the run")
     p.add_argument("--cache-features", action="store_true",
                    help="compute the frozen part of the model once per training window and fit the "
                         "trainable part on the cache. Same objective, far fewer seconds per step; the "

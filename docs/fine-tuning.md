@@ -172,7 +172,12 @@ drift a little.
 
 Other knobs: `--steps` (default 8000 per config), `--lr` (default 0.004), `--lr-schedule cosine`
 for a decay that would reach zero at `max(steps, 15000)` — the schedule the LOLO bundle used, so
-a default run ends near 45% of the peak rate — `--configs` to train one config while iterating
+a default run ends near 45% of the peak rate, and a 1000-step one barely decays at all
+(`--cosine-steps N` moves the point where it reaches zero; pass the same number as `--steps` to
+decay fully over the run) — `--patience N` for early stopping (a config stops once `N` steps pass
+without a gain in validation F1; default 10000, `0` = run every config the full `--steps`; with
+`--videos` the validation video can also be a training video, so a fixed-length comparison wants
+`--patience 0`), `--configs` to train one config while iterating
 (pair it with `predict.py --configs <same>`), `--from-weights` to warm-start from checkpoints you
 already trained rather than the published ones, `--seed`, `--gpu`, `--backend`, and `--smoke` for
 a short wiring check that writes no checkpoint. Run `--smoke` first on a new dataset: it takes
