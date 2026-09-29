@@ -64,10 +64,13 @@ def work_root():
     env = os.environ.get("HIDRA_WORKDIR")
     if env:
         return Path(env).expanduser()
+    # os.getuid is POSIX-only; on Windows fall back to the username (the temp dir is already
+    # per-user there), so the default scratch path resolves without HIDRA_WORKDIR being set.
+    uid = os.getuid() if hasattr(os, "getuid") else (os.environ.get("USERNAME") or "user")
     shm = Path("/dev/shm")
     if shm.is_dir() and os.access(shm, os.W_OK):
-        return shm / f"hidra-{os.getuid()}"
-    return Path(tempfile.gettempdir()) / f"hidra-{os.getuid()}"
+        return shm / f"hidra-{uid}"
+    return Path(tempfile.gettempdir()) / f"hidra-{uid}"
 
 
 def dataset_dir():
