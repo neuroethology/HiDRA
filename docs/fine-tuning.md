@@ -88,6 +88,17 @@ stop_frame` — the layout the trainer itself reads, and what `HiDRA_finetune.zi
 `prepare_dataset.py` took as input. Files are matched to tracking by stem or by the video id
 that stem hashes to, so either naming works and nothing needs converting.
 
+**Scoring in SLEAP?** An `.slp` file can hold the bouts itself, as `UserEvent`s on its tracks
+(`subject` the agent, `target` the recipient or none for a self-directed behaviour; `start_frame`
+and `end_frame` both inclusive, which `prepare` converts). `PredictedEvent`s are model proposals,
+not annotations, and are ignored. Put the `.slp` files in the tracking folder and leave out
+`--annotations`; or pass `.slp` files to `--annotations` to label parquet tracking with the same
+stems. Label with the head names, as for the CSV. An `.slp` whose provenance lists
+`behaviors_labeled` — the "agent,target,action" combinations that were scored, as the MABe-2025
+release's files do — does per video what `--also-scored` below does for all of them. The
+release labels sniffing as plain `sniff`, which is what `prepare` stages a `sniffall` label as
+anyway, so it trains the five splitting labs' merged head unchanged.
+
 **Behaviours you watched for and did not see.** A video with no bouts of a behaviour teaches
 the model nothing about it: combinations a video does not annotate are ignored, not treated as
 absent. `--also-scored 'mouse1,mouse2,attack;mouse2,mouse1,attack'` declares those combinations
@@ -123,6 +134,16 @@ overrides `--pix-per-cm`/`--fps` per file, exactly as for `predict.py`.
 
 Video ids are derived from the filename with the same hash `predict.py` uses, so a given recording
 has one id across prediction and training.
+
+From self-contained `.slp` files (their bouts as events, their scale and frame rate in
+provenance) the same step is just
+
+```bash
+python finetune.py prepare --tracking /path/to/slps --lab GroovyShrew --out ft_data/
+```
+
+`--pix-per-cm`/`--fps` and `metadata.csv` still override what a file says. Each `.slp` is staged
+as the tracking parquet it amounts to, so `train` reads the same layout either way.
 
 It prints the positive-frame percentage per video — worth a look, because a behaviour that
 occupies well under 1% of frames gives the head very few positive examples to learn from and makes
@@ -266,12 +287,15 @@ recordings they came from.)
 The sweep pools every scored (video, subject, target) track per head, takes the best-F1 threshold
 on a 0.05–0.95 grid, and merges the result into the bundled table so heads you did not calibrate
 keep their published value (`--no-merge` writes only yours). Only videos that appear in both the
-predictions and the CSV are scored, so the same `bouts.csv` serves training and calibration. By
+predictions and the CSV are scored, so the same `bouts.csv` serves training and calibration; `--annotations`
+also takes `.slp` files (their events) or a folder of annotation parquets, as `prepare` does. By
 default only (video, subject, target, action) combinations your CSV actually annotates are scored;
 `--all-pairs` also scores un-annotated pairs in those videos as all-negative. `--min-positives`
 (default 100) skips heads with too few positive frames to say anything, and an annotated action
 that has no prediction track at all (a misspelled or wrong-lab name) is reported rather than
-silently dropped.
+silently dropped. A `sniffall` head is scored against every sniff-family bout (`sniff, sniffface,
+sniffbody, sniffgenital, reciprocalsniff`, and `sniffall` itself) — the label the trainer derives
+for it — so annotations that name the subtypes calibrate it too.
 
 Run the same command against your zero-shot predictions to get the before/after F1 that tells you
 whether fine-tuning actually helped. Calibrating on the videos you trained on is optimistic — hold

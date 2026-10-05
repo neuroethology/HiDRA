@@ -253,9 +253,7 @@ def load_videos(ds, shard, smoke):
         df = df.iloc[:smoke]
     vids = []
     for idx, row in df.iterrows():
-        tp = os.path.join(cfg["dir"], f"{cfg['mode']}_tracking", str(row["lab_id"]),
-                          f"{int(row['video_id'])}.parquet")
-        if not os.path.isfile(tp):
+        if not data.has_tracking(row):          # its tracking parquet, or its SLP
             continue
         vids.append(data.create_video(idx, row))
     return vids

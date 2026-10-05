@@ -30,8 +30,8 @@ hidra-predict tracking/ --out results/ --pix-per-cm 16 --fps 30 \
     --labs GroovyShrew --actions rear,sniffall
 ```
 
-Input is a folder of long-format pose parquets (`video_frame, mouse_id, bodypart, x, y`)
-plus a pixel scale and frame rate per recording. Output is a per-frame probability track and
+Input is a folder of long-format pose parquets (`video_frame, mouse_id, bodypart, x, y`) or
+SLEAP `.slp` files, plus a pixel scale and frame rate per recording. Output is a per-frame probability track and
 a thresholded ethogram. See the [README](https://github.com/neuroethology/HiDRA) for the input
 schema and [docs/zero-shot.md](https://github.com/neuroethology/HiDRA/blob/main/docs/zero-shot.md)
 for choosing a head.

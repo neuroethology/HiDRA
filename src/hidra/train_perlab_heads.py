@@ -30,7 +30,6 @@ import numpy as np
 
 import jax
 import jax.numpy as jnp
-import pandas as pd
 
 from . import checkpoints, paths, solution
 from .pm_rule import pm_action_ok
@@ -609,21 +608,15 @@ class MultiTaskPerLabModel(solution.SupervisedModel):
 
 def load_train_videos_robust():
     """Like solution.load_videos('train') but skips videos whose tracking
-    parquet is missing from disk (1 known SparklingTapir file). Caches the
-    built video list to working_dir so later configs reuse it."""
+    parquet (or SLP) is missing from disk (1 known SparklingTapir file). Caches
+    the built video list to working_dir so later configs reuse it."""
     cache = f"{solution.working_dir}/train/videos.pkl"
     if os.path.isfile(cache):
         return pickle.load(open(cache, "rb"))
-    csv = os.path.join(solution.dataset_dir, "train.csv")
-    if not os.path.isfile(csv):
-        import shutil
-        shutil.copy(os.path.join(solution.dataset_dir, "TRAIN.csv"), csv)
-    df = pd.read_csv(csv); df["mode"] = "train"
+    df = solution.read_manifest("train"); df["mode"] = "train"   # train.csv, TRAIN.csv, or the SLPs
     videos, skipped = [], 0
     for i, row in df.iterrows():
-        p = os.path.join(solution.dataset_dir, "train_tracking",
-                         str(row["lab_id"]), f"{int(row['video_id'])}.parquet")
-        if not os.path.isfile(p):
+        if not solution.has_tracking(row):
             skipped += 1; continue
         videos.append(solution.create_video(i, row))
     print(f"built {len(videos)} train videos ({skipped} skipped: missing tracking)", flush=True)
