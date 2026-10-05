@@ -243,7 +243,8 @@ def read(path, pose=True):
 def manifest(files, split=None):
     """Manifest rows (the `train.csv` columns plus `slp`) for self-contained SLPs, from their
     provenance. With `split`, only the files whose provenance `split` is that one; a file
-    without a `split` counts as `train`.
+    without a `split` counts as `train`. Rows are in (lab_id, video_id) order, as the
+    competition's manifests are: the seeded 85/15 split (`data.split_videos`) depends on it.
 
     Training needs a lab, a pixel scale and a frame rate for every video, so a file missing
     any of them is an error naming it. `behaviors_labeled` may be absent: the row then takes
@@ -277,7 +278,7 @@ def manifest(files, split=None):
     if len(dup):
         raise ValueError(f"video_id(s) {sorted(set(dup))} appear in more than one SLP; "
                          f"each video needs its own id")
-    return df
+    return df.sort_values(["lab_id", "video_id"], kind="stable", ignore_index=True)
 
 
 def labeled_triplets(bouts):

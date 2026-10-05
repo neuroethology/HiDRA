@@ -386,3 +386,17 @@ def test_slp_annotations_for_parquet_tracking_carry_their_scored_list(corpus, tm
     assert sorted(a.index) == sorted(b.index) == ["v0", "v1"]
     for stem in a.index:
         assert json.loads(a.behaviors_labeled[stem]) == json.loads(b.behaviors_labeled[stem])
+
+
+def test_slp_manifest_is_in_lab_then_numeric_video_id_order(tmp_path):
+    """The competition manifests' order, which the seeded split depends on -- not the file
+    paths' string order, which would put 1001 before 999."""
+    labels, _ = _labels()
+    labels.provenance.update(frames_per_second=30.0, pix_per_cm_approx=16.0)
+    for lab, vid in (("LyricalHare", 5), ("GroovyShrew", 1001), ("GroovyShrew", 999)):
+        (tmp_path / lab).mkdir(exist_ok=True)
+        labels.provenance.update(lab_id=lab, video_id=vid)
+        labels.save(str(tmp_path / lab / f"{vid}.slp"))
+    m = slp.manifest(slp.find(tmp_path))
+    assert list(zip(m.lab_id, m.video_id, strict=True)) == [("GroovyShrew", 999), ("GroovyShrew", 1001),
+                                               ("LyricalHare", 5)]

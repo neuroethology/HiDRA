@@ -100,7 +100,10 @@ pd.DataFrame(rows).to_csv(f"{DATASET}/train.csv", index=False)
 MABe-2025 release's `<lab_id>/<video_id>.slp` tree works as it is. With no `train.csv` (or
 `test.csv`), the manifest is built from the files' provenance: `lab_id`, `video_id`,
 `frames_per_second`, `pix_per_cm_approx` and `behaviors_labeled`, and `split` (`train` or `test`;
-a file without one counts as `train`). The pose is the tracked instances and the bouts are the
+a file without one counts as `train`), with rows in (lab, video id) order as in the competition's
+manifests. That order matters: the seeded 85/15 split draws from one random stream across the
+labs in manifest order, so it reproduces the published split only on the same manifest — the
+same videos, MABe22 included, in the same order. The pose is the tracked instances and the bouts are the
 `UserEvent`s, read as the [README](../README.md#sleap-files) describes; a file missing its lab,
 scale or frame rate is an error naming it. A `train.csv` can also point rows at SLP files with an
 `slp` column (absolute, or relative to the dataset directory), which is how to train on SLPs
