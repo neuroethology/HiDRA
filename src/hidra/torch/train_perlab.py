@@ -107,11 +107,9 @@ DTYPES = {"bfloat16": torch.bfloat16, "float32": torch.float32, "float64": torch
 def load_finetune_videos():
     """Videos from the staged fine-tuning dataset, mirroring `load_train_videos_robust`.
 
-    Videos whose tracking parquet is absent are skipped rather than raising, matching the
-    original (the competition data has one such file).
+    Videos whose tracking parquet (or SLP) is absent are skipped rather than raising,
+    matching the original (the competition data has one such file).
     """
-    import pandas as pd
-
     from .. import data
 
     if os.environ.get("HIDRA_DATA_DIR"):
@@ -121,22 +119,15 @@ def load_finetune_videos():
         data.working_dir = os.environ["PERLAB_WORKDIR"]
         os.makedirs(data.working_dir, exist_ok=True)
 
-    csv = os.path.join(data.dataset_dir, "train.csv")
-    if not os.path.isfile(csv):
-        upper = os.path.join(data.dataset_dir, "TRAIN.csv")
-        if not os.path.isfile(upper):
-            sys.exit(f"ERROR: no TRAIN.csv in {data.dataset_dir}; run "
-                     f"`finetune.py prepare` first")
-        import shutil
-        shutil.copy(upper, csv)
-
-    df = pd.read_csv(csv)
+    try:
+        df = data.read_manifest("train")      # train.csv, TRAIN.csv, or the SLPs
+    except FileNotFoundError:
+        sys.exit(f"ERROR: no TRAIN.csv (and no .slp files) in {data.dataset_dir}; run "
+                 f"`finetune.py prepare` first")
     df["mode"] = "train"
     videos, skipped = [], 0
     for i, row in df.iterrows():
-        p = os.path.join(data.dataset_dir, "train_tracking", str(row["lab_id"]),
-                         f"{int(row['video_id'])}.parquet")
-        if not os.path.isfile(p):
+        if not data.has_tracking(row):
             skipped += 1
             continue
         videos.append(data.create_video(i, row))

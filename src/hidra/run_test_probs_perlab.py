@@ -19,8 +19,6 @@ import os
 import pickle
 import time
 
-import pandas as pd
-
 import jax
 import jax.numpy as jnp
 
@@ -91,7 +89,7 @@ def predict_into(config, predictions, num_epochs, dtype):
 
 
 def load_videos(shard_i, n_shard):
-    df = pd.read_csv(f"{solution.dataset_dir}/test.csv").copy()
+    df = solution.read_manifest("test").copy()   # test.csv, TEST.csv, or the SLPs
     df["mode"] = "test"
     # AdaptableSnail@25fps videos are now trained + predicted normally (skip removed).
     df = df.reset_index(drop=True)
@@ -113,8 +111,6 @@ def main():
                          "saved 37-space probs ARE this lab's per-lab classifier, "
                          "evaluated on every data-lab's videos (cross-lab matrices).")
     args = ap.parse_args()
-    if not os.path.isfile(f"{solution.dataset_dir}/test.csv"):
-        import shutil; shutil.copy(f"{solution.dataset_dir}/TEST.csv", f"{solution.dataset_dir}/test.csv")
     os.makedirs(args.out, exist_ok=True)
     i, n = map(int, args.shard.split("/"))
     tag = f"emb-{args.embedding_lab}_" if args.embedding_lab else ""

@@ -185,3 +185,15 @@ def test_a_new_sniffall_column_accepts_the_sniff_family():
     # Without a sniffall column there is nothing to feed, so the family is not admitted.
     with pytest.raises(SystemExit, match="no head for"):
         ft.check_actions(_annot(("sniffbody", "mouse2")), slot, extra_actions=["rear"])
+
+
+def test_calibrate_scores_sniffall_against_the_sniff_family():
+    """The merged head's positives are every sniff-family bout, as the trainer defines it --
+    so a source that labels the subtypes (the MABe-2025 .slp files say `sniff`) calibrates it."""
+    annot = pd.DataFrame(dict(stem="v", agent="mouse1", target="mouse2",
+                              action=["sniff", "sniffgenital", "rear"],
+                              start_frame=[0, 10, 20], stop_frame=[5, 15, 25]))
+    out = ft.with_sniffall(annot)
+    merged = out[out["action"] == "sniffall"][["start_frame", "stop_frame"]].values.tolist()
+    assert sorted(merged) == [[0, 5], [10, 15]]
+    assert len(out) == len(annot) + 2          # the original rows are kept as they were

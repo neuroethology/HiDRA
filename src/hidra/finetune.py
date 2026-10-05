@@ -39,10 +39,18 @@ THREE STEPS
   python predict.py /path/to/new --labs GroovyShrew --actions rear --out results/ \
       --weights 'ft_models/{config}__myrig.pkl' --thresholds ft_thresholds.csv ...
 
+SLEAP .slp INPUT
+  --tracking may hold .slp files (one video each) as well as parquets. An SLP whose bouts are
+  `UserEvent`s needs no --annotations: `prepare` reads them, plus the scale, frame rate and
+  scored (agent, target, action) list the file keeps in its provenance -- the MABe-2025
+  release's <lab_id>/<video_id>.slp files are like this:
+      python finetune.py prepare --tracking data/GroovyShrew --lab GroovyShrew --out ft_data/
+  `calibrate --annotations` takes .slp files too.
+
 ANNOTATION CSV (for `prepare` and `calibrate`)
   file,agent,target,action,start_frame,stop_frame
   mouseA_day1.parquet,mouse1,mouse2,rear,120,181
-  - one row per bout; `file` is the tracking parquet's filename (or its stem).
+  - one row per bout; `file` is the tracking file's name (or its stem).
   - `target` is a mouse id or `self` for self-directed behaviours (rear, dig, selfgroom, ...).
   - `stop_frame` is EXCLUSIVE by default (frames start..stop-1 are positive), matching the
     trainer. Pass --stop-inclusive if your stop_frame is the last positive frame -- which is
@@ -98,6 +106,7 @@ import pandas as pd
 
 from . import cli as hidra_predict   # vid_of / enum_heads / load_metadata / discover
 from . import head_table             # --new-head: the per-lab head's column list, and its sidecar
+from . import slp                    # .slp tracking and annotations
 from .schema import SNIFF_FAMILY     # numpy-only; the labels the merged sniffall head is built from
 
 CONFIGS = ["11fps_4bp", "15fps_5bp", "19fps_6bp", "23fps_7bp", "27fps_6bp"]
@@ -252,13 +261,51 @@ def read_annotation_dir(path, by_stem=None):
     return pd.concat(frames, ignore_index=True)[ANNOT_COLS + ["stem"]]
 
 
+def read_slp_annotations(paths, quiet=False):
+    """The `UserEvent` bouts of .slp files -> (the frame `read_annotations` returns, {stem: the
+    file's own scored "agent,target,action" list, or None where its provenance has none}).
+
+    An SLP's events are inclusive at both ends, and are converted to the exclusive
+    `stop_frame` here, so `--stop-inclusive` does not apply to them.
+    """
+    frames, scored = [], {}
+    for p in paths:
+        rec = hidra_predict.read_slp(p, pose=False, quiet=quiet)
+        b = rec.bouts
+        frames.append(pd.DataFrame(dict(
+            file=os.path.basename(p), stem=rec.stem, agent=b["agent_id"].to_numpy(),
+            target=b["target_id"].to_numpy(), action=b["action"].to_numpy(),
+            start_frame=b["start_frame"].to_numpy(), stop_frame=b["stop_frame"].to_numpy())))
+        scored[rec.stem] = rec.meta["behaviors_labeled"]
+    return pd.concat(frames, ignore_index=True)[ANNOT_COLS + ["stem"]], scored
+
+
+def _annotation_slps(path):
+    """The .slp files `--annotations PATH` names (an .slp, or a folder of them), or []."""
+    if slp.is_slp(path):
+        return [path]
+    if not os.path.isdir(path):
+        return []
+    slps = sorted(glob.glob(os.path.join(path, "*.slp")))
+    if slps and glob.glob(os.path.join(path, "*.parquet")):
+        sys.exit(f"ERROR: {path} holds both .slp files and .parquet files; --annotations reads "
+                 f"one kind. Point it at a folder of either.")
+    return slps
+
+
 def read_annotations(path, stop_inclusive=False, by_stem=None):
     """Load the annotations -> DataFrame[stem, agent, target, action, start_frame, stop_frame],
     with stop_frame EXCLUSIVE and `stem` the tracking filename without its extension.
 
-    `path` is the bout CSV, or a directory of per-video annotation parquets
-    (`read_annotation_dir`).
+    `path` is the bout CSV, a directory of per-video annotation parquets
+    (`read_annotation_dir`), or an .slp file / a directory of them (`read_slp_annotations`).
     """
+    slps = _annotation_slps(path)
+    if slps:
+        if stop_inclusive:
+            sys.exit("ERROR: --stop-inclusive is for bout CSVs and parquets; an .slp's events "
+                     "carry their own (inclusive) convention and are converted exactly")
+        return read_slp_annotations(slps)[0]
     if os.path.isdir(path):
         d = read_annotation_dir(path, by_stem)
         if stop_inclusive:
@@ -288,6 +335,18 @@ def read_annotations(path, stop_inclusive=False, by_stem=None):
     return d
 
 
+def admitted_actions(lab, hb, extra_actions=()):
+    """Every label a staged bout of `lab` may carry: its heads, the columns `--new-head`
+    adds (`extra_actions`), and the sniff family wherever there is a `sniffall` column."""
+    mine = annotatable_actions(lab, hb) | set(extra_actions)
+    if "sniffall" in mine:
+        # Whether the merged head is published or being added by --new-head, the labels that
+        # feed it are the sniff family -- `annotatable_actions` only knows about the
+        # published case, so a new sniffall column needs the same admission here.
+        mine |= set(SNIFF_FAMILY)
+    return mine
+
+
 def check_actions(annot, lab, thr_csv=None, drop_unsupported=False, extra_actions=()):
     """Every annotated action must be a head of `lab`, else there is nothing to fine-tune.
 
@@ -297,12 +356,7 @@ def check_actions(annot, lab, thr_csv=None, drop_unsupported=False, extra_action
         sys.exit(f"ERROR: no classifier heads for lab {lab!r}, and no --new-head to give it "
                  f"one. Labs with heads: {sorted(hb)}; head-free slots you can adopt as your "
                  f"own lab with --new-head: {head_table.head_free_slots()}")
-    mine = annotatable_actions(lab, hb) | set(extra_actions)
-    if "sniffall" in mine:
-        # Whether the merged head is published or being added by --new-head, the labels that
-        # feed it are the sniff family -- `annotatable_actions` only knows about the
-        # published case, so a new sniffall column needs the same admission here.
-        mine |= set(SNIFF_FAMILY)
+    mine = admitted_actions(lab, hb, extra_actions)
     unsupported = sorted(set(annot["action"]) - mine)
     if unsupported:
         elsewhere = {a: sorted(l for l, acts in hb.items() if a in acts) for a in unsupported}
@@ -359,30 +413,71 @@ def parse_also_scored(spec, allowed_actions):
     return out
 
 
+def scored_combinations(triplets, allowed):
+    """An .slp's own `behaviors_labeled` -> the (agent, target, action) combinations this lab
+    can train, with `sniffall` staged as `sniff` as `check_actions` does for bouts; and the
+    actions left out because the lab cannot train them."""
+    out, dropped = set(), set()
+    for t in triplets or ():
+        agent, target, action = (p.strip() for p in t.split(","))
+        if action not in allowed:
+            dropped.add(action)
+            continue
+        out.add((norm_mouse(agent), norm_mouse(target), "sniff" if action == "sniffall" else action))
+    return out, dropped
+
+
 def cmd_prepare(args):
-    """Stage tracking parquets + bouts into {out}/TRAIN.csv + {out}/train_{tracking,annotation}/{lab}/."""
+    """Stage tracking parquets / .slp files + bouts into {out}/TRAIN.csv + {out}/train_{tracking,annotation}/{lab}/."""
     parquets = hidra_predict.discover(args.tracking)
     if not parquets:
-        sys.exit(f"no .parquet/.pkt files in {args.tracking}")
+        sys.exit(f"no .parquet/.pkt/.slp files in {args.tracking}")
     by_stem = {os.path.splitext(os.path.basename(p))[0]: p for p in parquets}
 
     hb = heads_by_lab(args.thresholds)
-    annot = read_annotations(args.annotations, args.stop_inclusive, by_stem)
+    scored = {}            # stem -> the .slp's own scored list, when its events are the bouts
+    slps = (_annotation_slps(args.annotations) if args.annotations
+            else [p for p in parquets if slp.is_slp(p)])
+    if args.annotations and not slps:
+        annot = read_annotations(args.annotations, args.stop_inclusive, by_stem)
+    else:
+        if not slps:
+            sys.exit("ERROR: --annotations is required: parquet tracking carries no bouts (an .slp "
+                     "whose bouts are events does, and is then annotated by itself)")
+        if args.stop_inclusive:
+            sys.exit("ERROR: --stop-inclusive is for bout CSVs and parquets; an .slp's events "
+                     "carry their own (inclusive) convention and are converted exactly")
+        # Tracking .slp files are read again with their pose when staged, and report then.
+        annot, scored = read_slp_annotations(slps, quiet=not args.annotations)
+        print(f"  annotations: the events of {len(slps)} .slp file(s)"
+              + (f"; {len(parquets) - len(slps)} tracking parquet(s) have none"
+                 if not args.annotations and len(slps) < len(parquets) else ""))
     new_heads, _ = resolve_new_heads(args.new_head, args.lab, hb)
     new_actions = [a for _, a in new_heads]
     annot = check_actions(annot, args.lab, args.thresholds, args.drop_unsupported,
                           extra_actions=new_actions)
     also_scored = parse_also_scored(args.also_scored,
                                     annotatable_actions(args.lab, hb) | set(new_actions))
+    # An .slp that lists what was scored says, per video, what --also-scored says for all:
+    # those combinations' non-bout frames are negatives, bouts or no bouts.
+    allowed = admitted_actions(args.lab, hb, new_actions)
+    own_scored, left_out = {}, set()
+    for stem, triplets in scored.items():
+        own_scored[stem], dropped = scored_combinations(triplets, allowed)
+        left_out |= dropped
+    if left_out:
+        print(f"  note: not staging scored-but-unannotated combinations of {sorted(left_out)}: "
+              f"{args.lab} has no head for them")
 
     unknown = sorted(set(annot["stem"]) - set(by_stem))
     if unknown:
         sys.exit(f"ERROR: annotated file(s) not found in {args.tracking}: {unknown}\n"
                  f"  tracking files present: {sorted(by_stem)}")
     annotated_stems = set(annot["stem"])
-    # A video with no bouts is worth staging only when --also-scored says it was watched:
-    # then its frames are negatives. Otherwise it teaches the model nothing.
-    staged_stems = set(by_stem) if also_scored else annotated_stems
+    # A video with no bouts is worth staging only when --also-scored (or the .slp itself) says
+    # it was watched: then its frames are negatives. Otherwise it teaches the model nothing.
+    staged_stems = (set(by_stem) if also_scored else
+                    annotated_stems | {s for s, combos in own_scored.items() if combos})
     used = [by_stem[s] for s in sorted(staged_stems)]
     skipped = sorted(set(by_stem) - staged_stems)
     if skipped:
@@ -411,7 +506,10 @@ def cmd_prepare(args):
     for pq in used:
         stem = os.path.splitext(os.path.basename(pq))[0]
         vid = hidra_predict.vid_of(pq)               # same id predict.py uses for this filename
-        df = pd.read_parquet(pq)
+        if slp.is_slp(pq):                           # staged as the parquet it amounts to
+            df = hidra_predict.read_slp(pq).pose
+        else:
+            df = pd.read_parquet(pq)
         need = {"video_frame", "mouse_id", "bodypart", "x", "y"}
         if not need <= set(df.columns):
             sys.exit(f"ERROR: {stem}: tracking parquet needs columns {sorted(need)}, has {list(df.columns)}")
@@ -422,7 +520,10 @@ def cmd_prepare(args):
                          f"  Rename them to schema names (the 7 the model uses: {canon7}).")
         n_frames = int(df["video_frame"].max()) + 1
         mice = {norm_mouse(m) for m in df["mouse_id"].unique()}
-        shutil.copyfile(pq, os.path.join(tdir, f"{vid}.parquet"))
+        if slp.is_slp(pq):
+            df.to_parquet(os.path.join(tdir, f"{vid}.parquet"), index=False)
+        else:
+            shutil.copyfile(pq, os.path.join(tdir, f"{vid}.parquet"))
 
         a = annot[annot["stem"] == stem].copy()
         for col, name in (("agent", "agent"), ("target", "target")):
@@ -444,6 +545,11 @@ def cmd_prepare(args):
         # behaviors_labeled must list EVERY (agent, target, action) present in the annotations:
         # it is what marks a behaviour as supervised (and its non-bout frames as negatives).
         labeled = {f"{r.agent_id},{r.target_id},{r.action}" for r in out_a.itertuples()}
+        # The .slp's own scored list, for the mice it tracks (a few competition videos score
+        # mice that have no pose; the trainer would drop those combinations anyway).
+        for agent, target, action in own_scored.get(stem, ()):
+            if agent in mice and (target in mice or target == "self"):
+                labeled.add(f"{agent},{target},{action}")
         # --also-scored adds combinations this video watched for but recorded no bout of, so
         # every frame of them becomes a negative. Skipped where a named mouse is not tracked.
         for agent, target, action in also_scored:
@@ -754,10 +860,18 @@ def _frames_files(spec):
     return fs
 
 
+def with_sniffall(annot):
+    """`annot` plus each sniff-family bout again as `sniffall`, so the merged head is scored
+    against the union of sniff-family bouts -- the label the trainer derives for it. Sources
+    that label the subtypes (the MABe-2025 .slp files say `sniff`) then calibrate it too."""
+    fam = annot[annot["action"].isin(SNIFF_FAMILY)]
+    return pd.concat([annot, fam.assign(action="sniffall")], ignore_index=True)
+
+
 def cmd_calibrate(args):
     """Sweep the decision threshold of every (lab, action) against your annotations, pick the
     best-F1 value per head, and write a thresholds CSV predict.py can read with --thresholds."""
-    annot = read_annotations(args.annotations, args.stop_inclusive)
+    annot = with_sniffall(read_annotations(args.annotations, args.stop_inclusive))
     files = _frames_files(args.frames)
     grid = np.round(np.arange(args.min_threshold, args.max_threshold + 1e-9, args.step), 4)
 
@@ -789,7 +903,10 @@ def cmd_calibrate(args):
             p[g["frame"].to_numpy()] = g["prob"].to_numpy(np.float32)
             a = acc.setdefault((lab, act), {"p": [], "y": [], "tracks": 0, "videos": set()})
             a["p"].append(p); a["y"].append(y); a["tracks"] += 1; a["videos"].add(stem)
-    unpredicted = sorted(set(annot["action"]) - predicted_actions)
+    unpredicted = set(annot["action"]) - predicted_actions
+    if "sniffall" in predicted_actions:              # scored through it (with_sniffall)
+        unpredicted -= set(SNIFF_FAMILY)
+    unpredicted = sorted(unpredicted)
     if unpredicted:
         print(f"  note: annotated action(s) {unpredicted} have no prediction track in these files and "
               "are not scored -- either predict.py was not asked for them (--actions/--labs), or the "
@@ -853,21 +970,26 @@ def main():
                                  formatter_class=argparse.RawDescriptionHelpFormatter, epilog=__doc__)
     sub = ap.add_subparsers(dest="cmd", required=True)
 
-    p = sub.add_parser("prepare", help="stage tracking parquets + a bout CSV for training",
+    p = sub.add_parser("prepare", help="stage tracking parquets / .slp files + bouts for training",
                        formatter_class=argparse.RawDescriptionHelpFormatter, epilog=__doc__)
-    p.add_argument("--tracking", required=True, help="folder of pose parquets (as for predict.py)")
-    p.add_argument("--annotations", required=True,
-                   help="bout CSV (file,agent,target,action,start_frame,stop_frame), or a folder "
-                        "of per-video annotation parquets (agent_id,target_id,action,start_frame,"
-                        "stop_frame) named by tracking stem or video id")
+    p.add_argument("--tracking", required=True,
+                   help="folder of pose parquets and/or .slp files (as for predict.py)")
+    p.add_argument("--annotations",
+                   help="bout CSV (file,agent,target,action,start_frame,stop_frame), a folder of "
+                        "per-video annotation parquets (agent_id,target_id,action,start_frame,"
+                        "stop_frame) named by tracking stem or video id, or .slp file(s) whose "
+                        "events are the bouts. Leave it out when --tracking is .slp files that "
+                        "carry their own events")
     p.add_argument("--also-scored", metavar="A,T,ACTION;...",
                    help="(agent,target,action) combinations every staged video scored, even where "
                         "it has no bout of them -- their frames become negatives. Staging then "
                         "also includes tracking files with no annotations at all")
     p.add_argument("--lab", required=True, help="lab slot to adopt (see: python predict.py --list-heads)")
     p.add_argument("--out", default="ft_data", help="staging dir (default: ft_data)")
-    p.add_argument("--pix-per-cm", type=float, help="pixels-per-cm for all files (metadata.csv rows override)")
-    p.add_argument("--fps", type=float, help="frame rate for all files")
+    p.add_argument("--pix-per-cm", type=float,
+                   help="pixels-per-cm for all files (metadata.csv rows override; an .slp's own "
+                        "value is used when neither gives one)")
+    p.add_argument("--fps", type=float, help="frame rate for all files (same precedence)")
     p.add_argument("--stop-inclusive", action="store_true",
                    help="stop_frame is the LAST positive frame (predict.py bouts.csv convention)")
     p.add_argument("--drop-unsupported", action="store_true",
@@ -957,7 +1079,9 @@ def main():
                        formatter_class=argparse.RawDescriptionHelpFormatter, epilog=__doc__)
     p.add_argument("--frames", required=True, nargs="+",
                    help="predict.py output dir, or *.frames.parquet file(s)/glob(s)")
-    p.add_argument("--annotations", required=True, help="bout CSV for those videos (held-out, ideally)")
+    p.add_argument("--annotations", required=True,
+                   help="bouts for those videos (held-out, ideally): a bout CSV, a folder of "
+                        "annotation parquets, or .slp file(s) whose events are the bouts")
     p.add_argument("--out", default="ft_thresholds.csv", help="thresholds CSV to write (default: ft_thresholds.csv)")
     p.add_argument("--report", help="also write the per-head F1/precision/recall table here")
     p.add_argument("--stop-inclusive", action="store_true", help="stop_frame is the LAST positive frame")

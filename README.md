@@ -1,7 +1,7 @@
 # HiDRA — the High-Dimensional Rodent Annotator
 
 Apply the trained **per-lab-head behaviour-classifier ensemble** (5-config: 11fps_4bp, 15fps_5bp,
-19fps_6bp, 23fps_7bp, 27fps_6bp) to your own pose-tracking parquets. By default HiDRA runs **every
+19fps_6bp, 23fps_7bp, 27fps_6bp) to your own pose tracking — parquets or SLEAP `.slp` files. By default HiDRA runs **every
 lab's classifiers, for every behaviour, on every mouse pair**; you can narrow this with `--labs` /
 `--actions` or a job sheet.
 
@@ -98,8 +98,8 @@ convert your own fine-tuned checkpoints (`hidra-convert-weights`), or to publish
 
 ## Input
 
-A folder of tracking parquets (`.parquet` or `.pkt`), **long format**, one row per (frame, mouse,
-bodypart):
+A folder of tracking parquets (`.parquet` or `.pkt`) and/or [SLEAP `.slp` files](#sleap-files).
+A parquet is **long format**, one row per (frame, mouse, bodypart):
 
 | video_frame | mouse_id | bodypart | x | y |
 |---|---|---|---|---|
@@ -117,6 +117,23 @@ bodypart):
       lateral_left, lateral_right, forepaw_left, forepaw_right, hindpaw_left, hindpaw_right,
       tail_midpoint, tail_middle_1, tail_middle_2`, and 8 `headpiece_*` markers.
 
+### SLEAP files
+
+An `.slp` file is read as the parquet it amounts to, so everything above applies to its skeleton's
+node names. One video per file. Its pose comes from the tracked instances: where a frame has both a
+user-labelled and a predicted instance on a track the user one wins, a NaN or invisible point is a
+missing keypoint, and untracked instances are skipped (with a note), since only a track says which
+mouse an instance is. Tracks named `mouse1`…`mouse4` keep their names; otherwise the file's tracks
+become `mouse1`, `mouse2`, … in the order the file lists them (printed as a note), up to four.
+
+A **self-contained** SLP also carries what the parquet layout keeps elsewhere: its behaviour bouts
+as `UserEvent`s, and its pixel scale, frame rate, lab, split and scored behaviours in
+`labels.provenance` (`pix_per_cm_approx`, `frames_per_second`, `lab_id`, `split`,
+`behaviors_labeled`). The MABe-2025 release (`<lab_id>/<video_id>.slp`) is in this form. With such
+files, inference needs no metadata, [fine-tuning](docs/fine-tuning.md) needs no bout CSV, and
+[training](docs/training.md#1-the-dataset-layout) needs no manifest. Read them with
+[sleap-io](https://io.sleap.ai), which HiDRA installs.
+
 ## Metadata (required)
 
 Every recording needs a **pixel scale** (`pix_per_cm`) and **frame rate** (`fps`). A missing pixel
@@ -129,6 +146,10 @@ scale silently makes *all* predictions zero, so the tool refuses to run without 
   mouseA_day1.parquet,18.3,30 # per-file rows override the default
   ```
 - or one value for all files on the command line: `--pix-per-cm 16.0 --fps 30`.
+
+An `.slp` file's own values (provenance `pix_per_cm_approx` / `frames_per_second`, else its
+video's frame rate) are used where neither of those gives one. Where one does, it wins, and a note
+says if the file disagrees.
 
 ## Usage
 
@@ -182,7 +203,7 @@ is just deleting or zeroing rows. Only the labs that appear in enabled rows are 
 
 Split-lab sniffing appears as the merged **`sniffall`** head; the other labs use **`sniff`**.
 
-## Output (in `--out`, one set per input parquet)
+## Output (in `--out`, one set per input file)
 
 - `<stem>.bouts.csv` — compact ethogram from the thresholded calls:
   `subject,target,lab,action,start_frame,stop_frame,n_frames,mean_prob,threshold`
@@ -228,7 +249,8 @@ python predict.py  held_out/ --labs GroovyShrew --actions rear,sniffall --out ft
 python finetune.py calibrate --frames ft_preds/ --annotations bouts.csv --out ft_thresholds.csv
 ```
 
-`prepare` stages your parquets plus a bout CSV into the layout the trainer reads, `train`
+`prepare` stages your parquets plus a bout CSV — or `.slp` files, whose events are the bouts —
+into the layout the trainer reads, `train`
 warm-starts the adopted lab's head from the published checkpoint and adapts it to your data (5
 configs, one GPU; `--videos` keeps a recording out for the next step), and `calibrate` re-fits the
 decision thresholds against your annotations — useful on its own, with no training, if the
