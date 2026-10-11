@@ -24,6 +24,9 @@ dependencies = [
     "huggingface-hub>=0.34",
     # Both backends read weights through hidra/checkpoints.py, which prefers safetensors.
     "safetensors>=0.4",
+    # SLEAP .slp files as input alongside the parquets (pose, behaviour bouts stored as
+    # events, per-video metadata); see hidra/slp.py. 0.9.2 added frame-spanning events.
+    "sleap-io>=0.9.2",
 ]
 
 [project.optional-dependencies]

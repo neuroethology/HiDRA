@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """
 HiDRA -- the High-Dimensional Rodent Annotator.
-Apply the per-lab-head mouse-behaviour classifier ensemble to a folder of pose tracking parquets.
+Apply the per-lab-head mouse-behaviour classifier ensemble to a folder of pose tracking parquets
+or SLEAP .slp files.
 
 QUICK START
   # 0. one-time: fetch the model weights (~660 MB, safetensors) from the Hugging Face Hub
@@ -22,6 +23,8 @@ QUICK START
 INPUT
   A folder of tracking parquets (or .pkt), long format with columns:
      video_frame, mouse_id, bodypart, x, y
+  and/or SLEAP .slp files, one video each, whose tracks are the mice (named mouse1..mouse4,
+  or numbered in track order).
   Bodypart NAMES must be from the model schema; the 7 the model can use are:
      tail_base, ear_right, ear_left, nose, neck, body_center, tail_tip
   (extra bodyparts are ignored; missing ones are treated as unobserved.)
@@ -32,6 +35,8 @@ METADATA (REQUIRED)  -- a missing pixel scale silently zeroes every prediction, 
      *,16.0,30.0                 <- a '*' row sets the default for ALL files
      mouseA_day1.parquet,18.3,30 <- per-file rows override the default
   ...or pass one value for all files with --pix-per-cm and --fps.
+  An .slp file may carry its own (provenance pix_per_cm_approx / frames_per_second, else the
+  video's fps); those are used when neither metadata.csv nor the flags give a value.
 
 SELECTING CLASSIFIERS (the job sheet)
   Columns: run,lab,action,subject,target
@@ -39,19 +44,20 @@ SELECTING CLASSIFIERS (the job sheet)
     subject/target  a mouse id (mouse1..mouse4), 'self' (self-directed), or '*' for all pairs.
   With no --jobs, every classifier is applied to every pair (the default).
 
-OUTPUT  (per input parquet, in --out)
+OUTPUT  (per input file, in --out)
   <stem>.bouts.csv     compact ethogram: subject,target,lab,action,start_frame,stop_frame,mean_prob
   <stem>.frames.parquet  per-frame prob + call for every kept (subject,target,lab,action)
   (control with --output {both,calls,probs})
 """
-import os, sys, argparse, glob, subprocess, pickle, hashlib, shutil
+import os, sys, argparse, glob, subprocess, pickle, shutil
 os.environ.setdefault("SNIFFALL", "1")                       # register sniffall (id 37) before solution import
 os.environ.setdefault("XLA_FLAGS", "--xla_gpu_autotune_level=0")  # 6bp configs hang without this
 os.environ.setdefault("PREDICT_BATCH", "64")                 # long-video OOM guard
 os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "false")  # don't grab the whole GPU
 import numpy as np, pandas as pd
 
-from . import head_table, paths
+from . import head_table, paths, slp
+from .paths import vid_of   # re-exported: callers and tests use cli.vid_of
 
 ALL_LABS = ["AdaptableSnail", "BoisterousParrot", "CautiousGiraffe", "DeliriousFly", "ElegantMink",
             "GroovyShrew", "InvincibleJellyfish", "JovialSwallow", "LyricalHare", "NiftyGoldfinch",
@@ -192,8 +198,39 @@ def parse_jobs(path):
 
 
 def discover(folder):
-    fs = sorted(glob.glob(os.path.join(folder, "*.parquet")) + glob.glob(os.path.join(folder, "*.pkt")))
-    return [f for f in fs if os.path.basename(f) not in ("index.csv", "metadata.csv")]
+    fs = sorted(glob.glob(os.path.join(folder, "*.parquet")) + glob.glob(os.path.join(folder, "*.pkt"))
+                + glob.glob(os.path.join(folder, "*.slp")))
+    fs = [f for f in fs if os.path.basename(f) not in ("index.csv", "metadata.csv")]
+    # Outputs (and annotations) are matched to a recording by its stem, so two files that
+    # share one -- a.parquet next to a.slp -- would overwrite each other's results.
+    by_stem = {}
+    for f in fs:
+        by_stem.setdefault(os.path.splitext(os.path.basename(f))[0], []).append(os.path.basename(f))
+    clash = {s: n for s, n in by_stem.items() if len(n) > 1}
+    if clash:
+        sys.exit(f"ERROR: {folder} has more than one tracking file for the same recording name: "
+                 f"{clash}. Results are named by file stem; keep one of each.")
+    return fs
+
+
+def read_slp(path, pose=True, quiet=False):
+    """One .slp file as a `hidra.slp.Recording` (pose, bouts, metadata), printing what the
+    conversion skipped or renamed unless `quiet`."""
+    rec = slp.read(path, pose=pose)
+    if not quiet:
+        for note in rec.notes:
+            print(f"  note: {os.path.basename(path)}: {note}")
+    return rec
+
+
+def embedded_metadata(files):
+    """{path: (pix_per_cm, fps)} that each .slp in `files` carries itself (None where absent)."""
+    out = {}
+    for f in files:
+        if slp.is_slp(f):
+            m = slp.read_meta(f)
+            out[f] = (m["pix_per_cm_approx"], m["frames_per_second"])
+    return out
 
 
 def load_metadata(folder, parquets, cli_pix, cli_fps):
@@ -215,23 +252,30 @@ def load_metadata(folder, parquets, cli_pix, cli_fps):
                 if not pd.isna(s): default[1] = float(s)
             else:
                 per[f] = (None if pd.isna(p) else float(p), None if pd.isna(s) else float(s))
+    # An .slp can carry its own scale and rate. Those fill in what metadata.csv and the flags
+    # leave unsaid; a value given there wins, with a note if the file disagrees.
+    embedded = embedded_metadata(parquets)
     out = {}
     for pq in parquets:
         b = os.path.basename(pq)
         p, s = per.get(b, (None, None))
         p = p if p is not None else default[0]
         s = s if s is not None else default[1]
+        ep, es = embedded.get(pq, (None, None))
+        for name, given, own in (("pix_per_cm", p, ep), ("fps", s, es)):
+            if given is not None and own is not None and not np.isclose(given, own):
+                print(f"  note: {b}: using {name} {given:g} from metadata.csv/--{name.replace('_', '-')}; "
+                      f"the file itself says {own:g}")
+        p = p if p is not None else ep
+        s = s if s is not None else es
+        where = " (or store it in the .slp's provenance as pix_per_cm_approx)" if pq in embedded else ""
         if p is None:
-            sys.exit(f"ERROR: no pix_per_cm for {b}. Add a metadata.csv (file,pix_per_cm,fps) or pass --pix-per-cm. "
+            sys.exit(f"ERROR: no pix_per_cm for {b}. Add a metadata.csv (file,pix_per_cm,fps) or pass --pix-per-cm{where}. "
                      "A missing pixel scale makes ALL predictions zero.")
         if s is None:
             sys.exit(f"ERROR: no fps for {b}. Add it to metadata.csv or pass --fps.")
         out[pq] = (float(p), float(s))
     return out
-
-
-def vid_of(path):
-    return int(hashlib.md5(os.path.basename(path).encode()).hexdigest()[:12], 16) % 2_000_000_000
 
 
 def runs(mask):
@@ -247,7 +291,8 @@ def run(folder, jobs=None, labs=None, actions=None, subject="*", target="*",
         out="doom_predictions", pix_per_cm=None, fps=None, gpu="0", output="both",
         keep_work=False, weights=None, thresholds=THR_CSV, threshold=None, configs=None,
         backend="torch"):
-    """Run the ensemble over a folder of tracking parquets and write bouts/frames into `out`.
+    """Run the ensemble over a folder of tracking parquets / .slp files and write bouts/frames
+    into `out`.
 
     jobs      job-sheet path, or the dict parse_jobs() returns, or None for every head
     labs      restrict to these classifier labs (alternative to a job sheet)
@@ -283,7 +328,7 @@ def run(folder, jobs=None, labs=None, actions=None, subject="*", target="*",
 
     parquets = discover(folder)
     if not parquets:
-        sys.exit(f"no .parquet/.pkt files in {folder}")
+        sys.exit(f"no .parquet/.pkt/.slp files in {folder}")
     meta = load_metadata(folder, parquets, pix_per_cm, fps)
     # A checkpoint from `finetune.py train --new-head` can carry columns for a lab that has
     # no published head -- a head-free slot adopted as the user's own lab. Those labs are
@@ -296,7 +341,7 @@ def run(folder, jobs=None, labs=None, actions=None, subject="*", target="*",
                  f"{ALL_LABS}; a head-free slot is runnable only with the --weights that give it "
                  f"a head.")
     run_labs = [l for l in run_labs if l in runnable]
-    print(f"{len(parquets)} parquet(s); running {len(run_labs)} lab classifier set(s): {run_labs}")
+    print(f"{len(parquets)} tracking file(s); running {len(run_labs)} lab classifier set(s): {run_labs}")
 
     allbp, canon7 = bodypart_schema()
     os.makedirs(out, exist_ok=True)
@@ -309,7 +354,12 @@ def run(folder, jobs=None, labs=None, actions=None, subject="*", target="*",
     vmap = {}
     for pq in parquets:
         vid = vid_of(pq); vmap[vid] = pq
-        bps = set(pd.read_parquet(pq, columns=["bodypart"]).bodypart.unique())
+        if slp.is_slp(pq):                              # staged as the parquet it amounts to
+            pose = read_slp(pq).pose
+            bps = set(pose["bodypart"].unique())
+        else:
+            pose = None
+            bps = set(pd.read_parquet(pq, columns=["bodypart"]).bodypart.unique())
         bad = bps - allbp
         if bad:
             sys.exit(f"ERROR: {os.path.basename(pq)} contains bodypart names not in the model schema: {sorted(bad)}\n"
@@ -317,7 +367,10 @@ def run(folder, jobs=None, labs=None, actions=None, subject="*", target="*",
         miss = [b for b in canon7 if b not in bps]
         if miss:
             print(f"  note: {os.path.basename(pq)} is missing {miss} -> configs needing them use fewer keypoints (still runs)")
-        shutil.copyfile(pq, os.path.join(tdir, f"{vid}.parquet"))
+        if pose is None:
+            shutil.copyfile(pq, os.path.join(tdir, f"{vid}.parquet"))
+        else:
+            pose.to_parquet(os.path.join(tdir, f"{vid}.parquet"), index=False)
         p, s = meta[pq]
         rows.append(dict(lab_id=LAB_ID, video_id=vid, frames_per_second=s, pix_per_cm_approx=p, behaviors_labeled="[]"))
     pd.DataFrame(rows).to_csv(os.path.join(ds, "manifest.csv"), index=False)
@@ -389,15 +442,15 @@ def run(folder, jobs=None, labs=None, actions=None, subject="*", target="*",
 
     if not keep_work:
         shutil.rmtree(ds, ignore_errors=True)
-    print(f"done: {len(written)} parquet(s) -> {out}/")
+    print(f"done: {len(written)} file(s) -> {out}/")
     return written
 
 
 def main():
     ap = argparse.ArgumentParser(prog="HiDRA",
-                                 description="HiDRA (High-Dimensional Rodent Annotator): apply the per-lab-head behaviour classifier ensemble to pose parquets.",
+                                 description="HiDRA (High-Dimensional Rodent Annotator): apply the per-lab-head behaviour classifier ensemble to pose parquets or SLEAP .slp files.",
                                  formatter_class=argparse.RawDescriptionHelpFormatter, epilog=__doc__)
-    ap.add_argument("folder", nargs="?", help="folder of tracking parquets (.parquet/.pkt)")
+    ap.add_argument("folder", nargs="?", help="folder of tracking files (.parquet/.pkt/.slp)")
     ap.add_argument("--jobs", help="CSV job sheet selecting lab/action/subject/target (default: all)")
     ap.add_argument("--dump-jobs", metavar="FILE", help="write an editable job-sheet template and exit")
     ap.add_argument("--list-heads", action="store_true",
@@ -433,7 +486,7 @@ def main():
     if args.dump_jobs:
         dump_jobs(args.dump_jobs, args.thresholds, args.weights, configs); return
     if not args.folder:
-        ap.error("provide a parquet folder (or use --dump-jobs FILE / --list-heads)")
+        ap.error("provide a tracking folder (or use --dump-jobs FILE / --list-heads)")
     if args.jobs and (args.labs or args.actions):
         ap.error("--jobs and --labs/--actions are alternatives; use one or the other")
 

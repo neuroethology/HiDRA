@@ -11,6 +11,7 @@ variable so a cluster job can point them at scratch storage.
     HIDRA_WORKDIR        scratch space for the memory-mapped tracking cache
     HIDRA_DATASET_DIR    the researcher-private training/eval dataset root
 """
+import hashlib
 import os
 import tempfile
 from pathlib import Path
@@ -71,7 +72,7 @@ def work_root():
 
 
 def dataset_dir():
-    """Root of the researcher-private dataset tree (train/test parquets + CSVs).
+    """Root of the researcher-private dataset tree (train/test parquets + CSVs, or .slp files).
 
     Only the training and evaluation entry points use this; `hidra predict` stages the
     user's own parquets into a scratch dataset instead.
@@ -81,3 +82,12 @@ def dataset_dir():
         return Path(env).expanduser()
     root = repo_root()
     return (root / "data") if root is not None else (Path.cwd() / "data")
+
+
+def vid_of(path):
+    """A recording's integer video id, from its file name (extension included).
+
+    `predict.py`, `finetune.py prepare` and an SLP without a `video_id` all use it, so one
+    recording keeps one id across prediction, fine-tuning and training.
+    """
+    return int(hashlib.md5(os.path.basename(path).encode()).hexdigest()[:12], 16) % 2_000_000_000

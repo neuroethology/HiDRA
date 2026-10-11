@@ -105,13 +105,48 @@ class TrackingData:
         return frames
 
 
-def create_tracking_data(row):
+def slp_path(row):
+    """The SLP a manifest row reads its pose and bouts from (`slp` column, absolute or
+    relative to `dataset_dir`), or None for a row backed by the parquet layout."""
+    p = row.get("slp")
+    if p is None or pd.isna(p) or str(p) == "":
+        return None
+    p = str(p)
+    return p if os.path.isabs(p) else os.path.join(dataset_dir, p)
+
+
+def has_tracking(row):
+    """Whether a manifest row's pose is on disk: its SLP, or its tracking parquet."""
+    p = slp_path(row)
+    if p is None:
+        p = f"{dataset_dir}/{row['mode']}_tracking/{row['lab_id']}/{int(row['video_id'])}.parquet"
+    return os.path.isfile(p)
+
+
+def read_manifest(mode):
+    """The `mode` split's manifest: `{mode}.csv` (or `{MODE}.csv`) in `dataset_dir`, else one
+    row per self-contained SLP under it whose provenance puts it in that split
+    (`slp.manifest`). A CSV may also point rows at SLPs with an `slp` column."""
+    for name in (f"{mode}.csv", f"{mode.upper()}.csv"):
+        csv = os.path.join(dataset_dir, name)
+        if os.path.isfile(csv):
+            return pd.read_csv(csv)
+    from . import slp
+
+    slps = slp.find(dataset_dir)
+    if not slps:
+        raise FileNotFoundError(f"no {mode}.csv and no .slp files in {dataset_dir}")
+    return slp.manifest(slps, split=mode)
+
+
+def create_tracking_data(row, tracking_df=None):
     lab_name = str(row["lab_id"])
     video_id = int(row["video_id"])
     mode = row["mode"]
 
-    tracking_path = f"{dataset_dir}/{mode}_tracking/{lab_name}/{video_id}.parquet"
-    tracking_df = pd.read_parquet(tracking_path)
+    if tracking_df is None:   # given when the row is an SLP's (create_video read it)
+        tracking_path = f"{dataset_dir}/{mode}_tracking/{lab_name}/{video_id}.parquet"
+        tracking_df = pd.read_parquet(tracking_path)
 
     num_frames = int(tracking_df["video_frame"].max() + 1)
     index_names = ["video_frame", "mouse_id", "bodypart"]
@@ -212,7 +247,7 @@ class Labels:
         return frames
 
 
-def create_labels(row):
+def create_labels(row, annotation_df=None):
     lab_name = str(row["lab_id"])
     video_id = int(row["video_id"])
     mode = row["mode"]
@@ -258,8 +293,9 @@ def create_labels(row):
         label_masks.append(list(mouse_pair_label_set[mouse_pair]))
 
     annotation_path = f"{dataset_dir}/{mode}_annotation/{lab_name}/{video_id}.parquet"
-    if os.path.isfile(annotation_path):
+    if annotation_df is None and os.path.isfile(annotation_path):
         annotation_df = pd.read_parquet(annotation_path)
+    if annotation_df is not None:   # given when the row is an SLP's (create_video read it)
         behavior_gb = annotation_df.groupby(["agent_id", "target_id", "action"])
 
         for key, behavior_df in behavior_gb:
@@ -299,7 +335,8 @@ def create_labels(row):
 
 
 class Video:
-    def __init__(self, video_id, lab_name, tracking_data, labels, fps):
+    def __init__(self, video_id, lab_name, tracking_data, labels, fps, slp=None):
+        self.slp = slp            # the SLP it was read from, or None for the parquet layout
         self.lab_name = lab_name
         self.video_id = video_id
         self.tracking_data = tracking_data
@@ -310,16 +347,32 @@ class Video:
 
 
 def create_video(row_idx, row):
-    tracking_data = create_tracking_data(row)
+    tracking_df = annotation_df = None
+    path = slp_path(row)
+    if path is not None:
+        # A self-contained SLP holds the pose and the bouts; one read serves both.
+        from . import slp
+
+        rec = slp.read(path)
+        for note in rec.notes:
+            print(f"  note: {path}: {note}", flush=True)
+        tracking_df, annotation_df = rec.pose, rec.bouts
+        if pd.isna(row["behaviors_labeled"]):
+            # What the row leaves unsaid, the file says: its own scored list, else its bouts.
+            labeled = rec.meta["behaviors_labeled"]
+            row["behaviors_labeled"] = json.dumps(
+                labeled if labeled is not None else slp.labeled_triplets(rec.bouts))
+    tracking_data = create_tracking_data(row, tracking_df)
     row["tracked_mice"] = tracking_data.mouse_index
     row["num_frames"] = tracking_data.num_frames
-    labels = create_labels(row)
+    labels = create_labels(row, annotation_df)
     return Video(
         video_id=int(row["video_id"]),
         lab_name=str(row["lab_id"]),
         tracking_data=tracking_data,
         labels=labels,
         fps=float(row["frames_per_second"]),
+        slp=path,
     )
 
 
@@ -328,7 +381,7 @@ def load_videos(mode, use_cached=True):
     if use_cached and os.path.isfile(videos_path):
         return pickle.load(open(videos_path, "rb"))
 
-    df = pd.read_csv(f"{dataset_dir}/{mode}.csv")
+    df = read_manifest(mode)
     df["mode"] = mode
     videos = [create_video(idx, row) for idx, row in df.iterrows()]
 

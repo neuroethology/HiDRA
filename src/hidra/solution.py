@@ -56,8 +56,11 @@ from .data import (  # noqa: F401
     create_video,
     flat_seed,
     get_batch_size,
+    has_tracking,
     load_videos,
+    read_manifest,
     shared_array,
+    slp_path,
     split_videos,
     take,
     to_device,
@@ -1291,8 +1294,13 @@ def compute_ensemble_thresholds(configs):
         videos_filtered = [v for v in videos if v.lab_name not in TRAIN_ONLY_LABS]
         for video in videos_filtered:
             annotation_path = f"{data.dataset_dir}/train_annotation/{video.lab_name}/{video.video_id}.parquet"
+            df = None
             if os.path.isfile(annotation_path):
                 df = pd.read_parquet(annotation_path)
+            elif getattr(video, "slp", None):           # an SLP-backed video's bouts are its events
+                from . import slp
+                df = slp.read(video.slp, pose=False).bouts
+            if df is not None:
                 label_counts = df["action"].value_counts()
                 for action, v in dict(label_counts).items():
                     if action != "ejaculate":

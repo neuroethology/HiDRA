@@ -150,6 +150,51 @@ def write_dataset(out_dir, n_videos=1, n_frames=900, pix_per_cm=16.0, fps=30.0, 
     return [os.path.join(out_dir, n) for n in names]
 
 
+def write_slp(path, pose, bouts=None, provenance=None, track_names=None, fps=None):
+    """Write one video's long-format pose (and bouts) as a self-contained SLP, the way the
+    MABe-2025 release stores it: one `PredictedInstance` per (frame, mouse) on a track per
+    mouse, missing keypoints as NaN, each bout a `UserEvent` (`stop_frame` exclusive ->
+    `end_frame` inclusive, `self` -> no target), and `provenance` as given.
+
+    track_names  {mouse_id: track name}, to write tracks under other names
+    """
+    import sleap_io as sio
+
+    nodes = [b for b in USABLE_BODYPARTS if b in set(pose["bodypart"])]
+    skeleton = sio.Skeleton(nodes=list(nodes))      # a copy: Skeleton converts its list in place
+    mice = sorted(pose["mouse_id"].unique())
+    tracks = {m: sio.Track(name=(track_names or {}).get(m, m)) for m in mice}
+    video = sio.Video(filename=os.path.splitext(os.path.basename(str(path)))[0] + ".mp4",
+                      backend=None)
+    if fps is not None:
+        video.fps = float(fps)
+
+    xy = pose.set_index(["video_frame", "mouse_id", "bodypart"])[["x", "y"]]
+    frames = []
+    for frame_idx, rows in xy.groupby(level=0, sort=True):
+        instances = []
+        for mouse, r in rows.groupby(level=1, sort=True):
+            pts = np.full((len(nodes), 2), np.nan)
+            for (_, _, part), (x, y) in r.iterrows():
+                pts[nodes.index(part)] = (x, y)
+            instances.append(sio.PredictedInstance.from_numpy(
+                pts, skeleton=skeleton, point_scores=np.full(len(nodes), np.nan), score=np.nan,
+                track=tracks[mouse]))
+        frames.append(sio.LabeledFrame(video=video, frame_idx=int(frame_idx), instances=instances))
+
+    events = []
+    for b in (bouts if bouts is not None else []):
+        events.append(sio.UserEvent(
+            type=b["action"], video=video, start_frame=int(b["start_frame"]),
+            end_frame=int(b["stop_frame"]) - 1, subject=tracks[b["agent"]],
+            target=None if b["target"] == "self" else tracks[b["target"]]))
+    labels = sio.Labels(labeled_frames=frames, videos=[video], skeletons=[skeleton],
+                        tracks=list(tracks.values()), provenance=dict(provenance or {}),
+                        events=events)
+    sio.save_slp(labels, str(path))
+    return str(path)
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("out_dir")

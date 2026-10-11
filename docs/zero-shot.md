@@ -13,13 +13,15 @@ your arena is a different size), fine-tune the head you picked instead:
 
 ## 1. What you need
 
-- Pose parquets in long format (`video_frame, mouse_id, bodypart, x, y`), bodypart names from the
-  model schema — the 7 the model uses are `nose, ear_left, ear_right, neck, body_center,
-  tail_base, tail_tip`. See [the README](../README.md#input) for the full name list and the rules
-  on extra/missing/unrecognized parts.
+- Pose parquets in long format (`video_frame, mouse_id, bodypart, x, y`) or SLEAP `.slp` files
+  ([how they are read](../README.md#sleap-files)), bodypart names from the model schema — the 7
+  the model uses are `nose, ear_left, ear_right, neck, body_center, tail_base, tail_tip`. See
+  [the README](../README.md#input) for the full name list and the rules on
+  extra/missing/unrecognized parts.
 - `pix_per_cm` and `fps` per recording. **A missing pixel scale silently zeroes every
   prediction**, so HiDRA refuses to run without it. Either a `metadata.csv` in the folder or
-  `--pix-per-cm N --fps N` on the command line.
+  `--pix-per-cm N --fps N` on the command line; an `.slp` that stores them in its provenance
+  needs neither.
 - The weights: `python download_models.py` (~660 MB of safetensors from
   [Neuroethology/HiDRA](https://huggingface.co/Neuroethology/HiDRA)).
 - A GPU. CPU works and is much slower.
@@ -94,7 +96,7 @@ results.
 
 ## 4. Read the output
 
-Per input parquet, in `--out`:
+Per input file, in `--out`:
 
 - **`<stem>.bouts.csv`** — the ethogram: `subject,target,lab,action,start_frame,stop_frame,
   n_frames,mean_prob,threshold`. `stop_frame` is the **last** frame of the bout (inclusive).

@@ -94,6 +94,31 @@ for f in sorted(glob.glob("parquets/*.parquet")):
 pd.DataFrame(rows).to_csv(f"{DATASET}/train.csv", index=False)
 ```
 
+### Or a folder of self-contained SLP files
+
+`$HIDRA_DATASET_DIR` can instead hold SLEAP `.slp` files, one video each, anywhere below it — the
+MABe-2025 release's `<lab_id>/<video_id>.slp` tree works as it is. With no `train.csv` (or
+`test.csv`), the manifest is built from the files' provenance: `lab_id`, `video_id`,
+`frames_per_second`, `pix_per_cm_approx` and `behaviors_labeled`, and `split` (`train` or `test`;
+a file without one counts as `train`), with rows in (lab, video id) order as in the competition's
+manifests. That order matters: the seeded 85/15 split draws from one random stream across the
+labs in manifest order, so it reproduces the published split only on the same manifest — the
+same videos, MABe22 included, in the same order. The pose is the tracked instances and the bouts are the
+`UserEvent`s, read as the [README](../README.md#sleap-files) describes; a file missing its lab,
+scale or frame rate is an error naming it. A `train.csv` can also point rows at SLP files with an
+`slp` column (absolute, or relative to the dataset directory), which is how to train on SLPs
+whose provenance lacks those fields. A row whose `behaviors_labeled` is blank then takes the
+file's own list, else the combinations its bouts cover.
+
+The training arrays an SLP produces are byte-identical to those from the parquet layout of the
+same data: checked on all 587 videos of the MABe-2025 release, against the parquets its
+`mabe_slp.py to-pkt` writes. Reading an SLP is slower than reading a parquet, though: a median
+1.3 s for a 10-minute video and 48 s for the release's largest, so the release's 368 training
+videos take 18 minutes on one core against 81 s as parquets. Both stages read the corpus once and
+then reuse `HIDRA_WORKDIR`'s cache (`tmp/train/videos.pkl`), so this is paid once per work
+directory; if even that matters, convert to the parquet layout first (`mabe_slp.py to-pkt`, a
+minute on 32 cores).
+
 ## 2. Stage 1: the self-supervised trunk
 
 ```bash
