@@ -87,7 +87,15 @@ def env_settings(config_name):
         "ema_decay": float(os.environ.get("LABTAIL_EMA", "0.9993")),
         "batch_size": int(os.environ.get("LABTAIL_BATCH", "128")),
         "dtype": os.environ.get("LABTAIL_DTYPE", "bfloat16"),
-        "ddi_steps": int(os.environ.get("LABTAIL_DDI_STEPS", "256")),
+        # --ddi-steps: batches of the input-statistics recalibration pass. The original's 256
+        # for the modes that train the tail; 0 for `head` mode, where the tail is frozen and
+        # must keep reading its inputs through the statistics it was trained with -- the pass
+        # re-estimates them for every layer, and on a new lab's few videos that pinned
+        # head-only fine-tunes at F1 ~0.32, below the zero-shot donor head (0.47); keeping
+        # the foundation's statistics gave 0.36 -> 0.51 over 3 -> 240 positive seconds
+        # (machine B, 2026-10-09). `LABTAIL_KEEP_STATS` is the same default on the JAX side.
+        "ddi_steps": int(os.environ.get("LABTAIL_DDI_STEPS",
+                                        "0" if resolve_mode() == "head" else "256")),
         # --new-head Lab,action[;Lab,action...] / --seed-from Lab,action|Lab (finetune.py
         # train): widen the head by those columns.
         "new_head": os.environ.get("LABTAIL_NEW_HEAD") or None,
@@ -432,6 +440,10 @@ def finetune_config(settings, smoke=False, device=None):
         head.set_stage("train")
         print(f"[DDI] recalibrated input statistics over {n_ddi} batch(es) "
               f"({time.time() - t0:.0f}s)", flush=True)
+    else:
+        print("[DDI] skipped: every layer keeps the warm-start checkpoint's input statistics"
+              + (" (the default in head mode; LABTAIL_DDI_STEPS=N recalibrates)"
+                 if mode == "head" else ""), flush=True)
 
     trainable = [p for p in head.parameters() if p.requires_grad]
     optimizer = T.SchedAdam(trainable, settings["lr"], total=settings["cosine_total"],

@@ -40,9 +40,11 @@ def test_reference_file_unmodified(name):
     )
 
 
-def test_reference_models_symlink():
-    """reference/models must resolve to the same weights the package uses."""
+def test_reference_models_symlink(monkeypatch):
+    """reference/models must resolve to the same weights the package uses by default."""
     from hidra import paths
+    # The default location is under test, not wherever this session keeps its weights.
+    monkeypatch.delenv("HIDRA_MODELS_DIR", raising=False)
     link = REFERENCE_DIR / "models"
     assert link.is_symlink(), "reference/models should be a symlink to the repo-root models/"
     assert link.resolve() == paths.models_dir().resolve()

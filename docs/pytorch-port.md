@@ -14,7 +14,13 @@ Both read the same published weights. `--backend jax` needs the `[jax]` extra in
 
 ## Headline result
 
-Measured on an RTX A6000 with the published checkpoints:
+Measured on an RTX A6000 with the checkpoints published up to 2026-09 (the multi-task model
+with the shared head). **The 2026-10 weights have not yet been re-measured on a GPU**: the
+machine that staged them had no working CUDA driver at the time. What was checked on CPU for the
+new weights is in [CHANGELOG.md](../CHANGELOG.md) — the per-lab logits of both backends on a
+synthetic batch of the real 15fps_5bp and 11fps_4bp weights, and a JAX-vs-torch agreement test on
+random weights of the no-shared-head model (`tests/test_no_shared_head.py`). Re-running the
+end-to-end comparison below on the new weights is the first thing to do on a GPU machine.
 
 | level | comparison | result |
 |---|---|---|
@@ -107,6 +113,15 @@ feature fast paths, all gated on environment variables that the CLI never sets �
 explicitly strips them. They are absent rather than ported unused; adding one back is a
 deliberate act, not an accident.
 
+The per-lab head is built **without the shared 38-way `out-proj`** since the 2026-10 weights,
+matching the JAX trainer's default. `MultiTaskPerLabModel(..., shared_head=True)` /
+`load_perlab(..., shared_head=True)` build the legacy multi-task variant (`SHARED_HEAD=1` on the
+JAX side). A checkpoint that carries `out-proj/*` — every release up to 2026-09, and the inert
+copy in the 2026-10 pickles — loads into the canonical head with those eight tensors listed under
+`load_report["unexpected"]`, next to the trunk's dead `norm` leaf; nothing ever read them at
+inference. `ddi_forward` and `perlab_loss(include_shared=True)` consult the layer only when it
+exists.
+
 ## Real behavioural differences between JAX and PyTorch
 
 These are places where the two frameworks genuinely disagree and the port had to choose.
@@ -169,14 +184,28 @@ at `stage="init"` after building the variables, so the classifier head's input
 standardization is re-calibrated on the new data even when every weight was copied from a
 published checkpoint. The frozen trunk is excluded — it is held outside the head's layer dict
 and pinned to `stage="eval"`, so `set_stage` never reaches it. The port keeps the trunk out
-of the module tree for the same reason. Both output projections *are* included, because
-`compute_loss` applies them.
+of the module tree for the same reason. The output projection *is* included, because
+`compute_loss` applies it (both of them, on a legacy head that still has the shared one).
+
+The pass re-estimates the statistics of **every** layer of the head module, the frozen tail's
+included. In `tail` mode that is what the original does and the tail co-adapts; in `head` mode
+the frozen tail would then read its inputs through statistics it was never trained with, which
+on a new lab's few videos pinned head-only fine-tunes at F1 ≈ 0.32, below the zero-shot donor
+head (0.47); keeping the foundation's statistics gave 0.36 → 0.51 over 3 → 240 positive seconds
+(2026-10-09). Since 2026-10 the torch driver therefore defaults `LABTAIL_DDI_STEPS` to 0 in head
+mode, and the JAX trainer restores the warm-start statistics after its pass
+(`LABTAIL_KEEP_STATS`, on by default under `LABTAIL_HEAD_ONLY`). `finetune.py train --ddi-steps N`
+turns the pass back on for either backend.
 
 ## Checkpoints
 
 `hidra-convert-weights` rewrites the 10 published pickles as safetensors, verifying byte
 equality on read-back. `hidra.torch` prefers `.safetensors` when present and falls back to
-`.pkl`, and a test asserts inference is bit-identical from either container.
+`.pkl`, and a test asserts inference is bit-identical from either container. The one deliberate
+departure from "pure re-container" is `--strip-shared-head`, which leaves the per-lab pickles'
+inert `out-proj` subtree out of the safetensors (177 tensors instead of 185, recorded in the
+metadata as `dropped_layers`); the 2026-10 Hub files were converted that way, and are
+byte-identical to what the trainer wrote.
 
 The conversion needs no JAX. The pickles reference exactly one JAX symbol —
 `jax._src.array._reconstruct_array`, whose only job is to rebuild a numpy array and

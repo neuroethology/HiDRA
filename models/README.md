@@ -24,10 +24,25 @@ Inference averages all five configs, so all five are needed.
 Set `$HIDRA_MODELS_DIR` to keep them somewhere else — on a scratch filesystem, or shared
 between checkouts.
 
+## Releases
+
+| weights | what | pin with |
+|---|---|---|
+| **2026-10** (current `main`) | retrained self-supervised trunks (2026-10-06/07) and a per-lab classifier trained **without the shared cross-lab head** (2026-10-07/08); same 82 heads, re-calibrated thresholds; held-out mean F1 0.613 | `--revision <sha of the 2026-10 upload; see the model card>` |
+| 2026-09 and earlier | the multi-task model (per-lab head + shared 38-way head), trained on the original trunks | `--revision 6b9770c99f9e6e20a89f7c2b68169a72b14631e5` (safetensors); its pickles: `--format pkl --revision 4147d4fce1c46f7d56fdbf5dcc3e1e3b2888ba00` |
+
+The model card on the Hub (`README.md` there, `src/hidra/assets/model_card.md` here) carries the
+exact commit shas. [CHANGELOG.md](../CHANGELOG.md) has the full account of what changed and why.
+Both sets load with the current code; only the current set's thresholds are bundled, so a pinned
+older set needs the thresholds CSV of its own release (`--thresholds`).
+
 ## Formats
 
 safetensors is the default: it executes no code on load and is read with numpy alone, so
-opening the weights needs neither JAX nor PyTorch.
+opening the weights needs neither JAX nor PyTorch. The 2026-10 per-lab files were converted with
+`hidra-convert-weights --strip-shared-head`, which leaves out the inert copy of the previous
+model's shared head that the release pickles carry for older HiDRA versions; what remains is
+byte-identical to the trainer's output.
 
 The original `.pkl` checkpoints — pickles of JAX device arrays — hold the identical float32
 values, verified byte-for-byte, and running the JAX backend from safetensors reproduces a

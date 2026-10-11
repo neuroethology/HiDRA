@@ -27,7 +27,7 @@ pose ─▶ [ SSL trunk ]─▶[ feature merge ]─▶ x0 ─▶ + lab embedding
 | 7b | **Another round on top of (5)–(7)** | more annotations | whatever that mode trains | ~10 s | [new-behaviours.md §4b](new-behaviours.md) |
 | 8 | **Fine-tune `--mode embedding`** | several recordings | 26.5k numbers | as (5) | [fine-tuning.md §3](fine-tuning.md#3-train) |
 | 9 | **Fine-tune `--mode tail`** | several recordings, ideally your own lab slot | 4.8M numbers | ~1–6 h | [fine-tuning.md §3](fine-tuning.md#3-train) |
-| 10 | **Retrain stage 2** | a corpus | merge + tail + both heads | 4–10 h × 5 configs, JAX | [training.md §3](training.md#3-stage-2-the-supervised-per-lab-tail-and-heads) |
+| 10 | **Retrain stage 2** | a corpus | merge + tail + the per-lab head | 4–10 h × 5 configs, JAX | [training.md §3](training.md#3-stage-2-the-supervised-per-lab-tail-and-heads) |
 | 11 | **Retrain stage 1** | a corpus, no labels needed | the trunk | ~1 day × 5 configs, JAX | [training.md §2](training.md#2-stage-1-the-self-supervised-trunk) |
 
 Routes 1–4 are free of training entirely, and between them they fix most of what "the calls

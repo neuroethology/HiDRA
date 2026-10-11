@@ -92,6 +92,23 @@ def test_patience_reaches_the_trainer(staged):
     assert "--patience must be >= 0" in out
 
 
+def test_head_mode_keeps_the_input_statistics_by_default(staged):
+    """In `head` mode the frozen tail must keep the checkpoint's input-normalisation statistics
+    (no recalibration pass) unless --ddi-steps asks for one; --ddi-steps 0 is the same thing
+    spelled out, and on the JAX side it maps to LABTAIL_KEEP_STATS."""
+    out = _plan(staged, "--seed-from", DONOR)                      # --mode head is the default
+    assert "keeps the checkpoint's input-normalisation statistics" in out
+    assert "LABTAIL_DDI_STEPS" not in out                           # the trainer's own default (0)
+    out = _plan(staged, "--seed-from", DONOR, "--ddi-steps", "0")
+    assert "LABTAIL_DDI_STEPS=0" in out and "LABTAIL_KEEP_STATS=1" in out
+    out = _plan(staged, "--seed-from", DONOR, "--ddi-steps", "64")
+    assert "LABTAIL_DDI_STEPS=64" in out and "LABTAIL_KEEP_STATS=0" in out
+    out = _plan(staged, "--seed-from", DONOR, "--mode", "tail")
+    assert "keeps the checkpoint's input-normalisation statistics" not in out
+    out = _plan(staged, "--seed-from", DONOR, "--ddi-steps", "-1", expect=1)
+    assert "--ddi-steps must be >= 0" in out
+
+
 def test_from_weights_is_checked_before_anything_runs(staged, tmp_path):
     out = _plan(staged, "--seed-from", DONOR, "--from-weights", "nope.pkl", expect=1)
     assert "must contain a '{config}' placeholder" in out

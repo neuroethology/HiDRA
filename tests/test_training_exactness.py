@@ -434,7 +434,8 @@ def test_ddi_recalibration_matches(config, videos, jax_head, device):
             T.ddi_forward(head, to_torch_batch(b, device))
     head.set_stage("eval")
 
-    checked = ["feat-flat-proj", "ff-0-in", "ff-2-out", "out-proj", "out-proj-perlab"]
+    # No "out-proj": the canonical head has no shared 38-way layer (SHARED_HEAD=1 restores it).
+    checked = ["feat-flat-proj", "ff-0-in", "ff-2-out", "out-proj-perlab"]
     for layer in checked:
         jvars = jax_head.layers[layer].variables
         tl = head.layers[layer]

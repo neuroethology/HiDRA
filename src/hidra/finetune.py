@@ -572,7 +572,7 @@ def cmd_train(args):
         "LABTAIL_VIDS", "LABTAIL_SRC", "CACHED_X0_DIR", "CACHED_PREMERGE_DIR", "SKIP_PATH",
         "FILM", "CORAL", "TRAJ_KEEP", "DONOR_LAB", "CURATE_ACTION", "CURATE_VIDS", "FND_TAG",
         "LABTAIL_NEW_HEAD", "LABTAIL_SEED_FROM", "LABTAIL_CACHE", "LABTAIL_CACHE_PASSES",
-        "LABTAIL_PATIENCE",
+        "LABTAIL_PATIENCE", "SHARED_HEAD",
         "LR_COSINE_T", "LR_FLOOR", "HIDRA_PERLAB_CKPT"}}
     env = dict(env,
                SNIFFALL="1",                          # canonical 82-column head layout (adds sniffall)
@@ -610,7 +610,16 @@ def cmd_train(args):
             sys.exit("ERROR: --patience must be >= 0 (0 turns early stopping off)")
         env["LABTAIL_PATIENCE"] = str(args.patience)
     if args.ddi_steps is not None:
+        if args.ddi_steps < 0:
+            sys.exit("ERROR: --ddi-steps must be >= 0")
         env["LABTAIL_DDI_STEPS"] = str(args.ddi_steps)
+        # The JAX trainer's pass is a fixed 256 batches; its knob is whether the warm-start
+        # statistics are put back afterwards, which is what 0 steps amounts to.
+        env["LABTAIL_KEEP_STATS"] = "1" if args.ddi_steps == 0 else "0"
+    elif args.mode == "head" and "LABTAIL_DDI_STEPS" not in env:
+        print("  note: head mode keeps the checkpoint's input-normalisation statistics (no "
+              "recalibration pass): the tail is frozen, so it should read its inputs the way it "
+              "was trained to. Pass --ddi-steps 256 for the pre-2026-10 behaviour.")
     if args.cache_features:                           # train on cached frozen features
         env["LABTAIL_CACHE"] = "1"
         env["LABTAIL_CACHE_PASSES"] = str(args.cache_passes)
@@ -666,9 +675,9 @@ def cmd_train(args):
         # checkpoints; this prints what would run and stops before claiming a GPU.
         shown = ["HIDRA_DATA_DIR", "LABTAIL", "LABTAIL_ACTIONS", "LABTAIL_NEW_HEAD",
                  "LABTAIL_SEED_FROM", "LABTAIL_HEAD_ONLY", "LABTAIL_EMB_ONLY", "LABTAIL_VIDS",
-                 "LABTAIL_CACHE", "LABTAIL_CACHE_PASSES", "LABTAIL_DDI_STEPS", "FT_STEPS",
-                 "FT_LR", "LR_COSINE_T", "LABTAIL_PATIENCE", "HIDRA_PERLAB_CKPT", "LABTAIL_TAG",
-                 "LABTAIL_OUTDIR"]
+                 "LABTAIL_CACHE", "LABTAIL_CACHE_PASSES", "LABTAIL_DDI_STEPS", "LABTAIL_KEEP_STATS",
+                 "FT_STEPS", "FT_LR", "LR_COSINE_T", "LABTAIL_PATIENCE", "HIDRA_PERLAB_CKPT",
+                 "LABTAIL_TAG", "LABTAIL_OUTDIR"]
         module = ("hidra.torch.train_perlab" if getattr(args, "backend", "torch") == "torch"
                   else "hidra.train_perlab_heads")
         print("\n--dry-run: nothing was trained. Per config, this would run")
@@ -949,8 +958,11 @@ def main():
                    help="with --cache-features: augmentation draws cached per window (default 4). "
                         "More = more augmentation variety and more memory")
     p.add_argument("--ddi-steps", type=int, metavar="N",
-                   help="batches of input-statistics recalibration before training (default 256, the "
-                        "original's). The dominant cost of a cached run -- see docs/fine-tuning.md")
+                   help="batches of input-statistics recalibration before training. Default 256 (the "
+                        "original's) in tail and embedding mode; 0 in head mode, where the frozen tail "
+                        "keeps the statistics it was trained with (a recalibrated tail pinned head-only "
+                        "fine-tunes below zero-shot). Also the dominant cost of a cached run -- see "
+                        "docs/fine-tuning.md")
     p.set_defaults(func=cmd_train)
 
     p = sub.add_parser("calibrate", help="pick best-F1 thresholds from predictions + annotations",

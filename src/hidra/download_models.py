@@ -24,6 +24,10 @@ from . import paths
 
 # The Hub repo holding the weights. Override with --repo / $HIDRA_HF_REPO.
 DEFAULT_REPO = os.environ.get("HIDRA_HF_REPO", "Neuroethology/HiDRA")
+# `main` follows the latest upload. The weights changed wholesale in 2026-10 (retrained trunks,
+# per-lab classifier trained without the shared head; see CHANGELOG.md), so a study that must
+# stay on one set should pin a revision here or with --revision / $HIDRA_HF_REVISION: the
+# model card on the Hub lists the commit sha of each release.
 DEFAULT_REVISION = os.environ.get("HIDRA_HF_REVISION", "main")
 
 CONFIGS = ["11fps_4bp", "15fps_5bp", "19fps_6bp", "23fps_7bp", "27fps_6bp"]

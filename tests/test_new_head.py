@@ -261,7 +261,7 @@ def test_convert_one_carries_the_table_into_safetensors(widened_checkpoint, conf
     from hidra.torch.models import build_unsupervised, load_perlab
 
     out, n = convert_one(widened_checkpoint["path"], tmp_path / "widened.safetensors", verify=True)
-    assert out.is_file() and n == 185
+    assert out.is_file() and n in (177, 185)      # with / without the shared head's 8 tensors
     meta = read_metadata(out)
     assert json.loads(meta["lab_action"]) == [list(p) for p in widened_checkpoint["table"]]
     assert meta["n_heads"] == "83"

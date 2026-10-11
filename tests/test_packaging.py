@@ -29,9 +29,11 @@ def test_thresholds_frame():
     assert len(t) >= 82
 
 
-def test_paths_resolve_inside_checkout():
+def test_paths_resolve_inside_checkout(monkeypatch):
     from hidra import paths
 
+    # The default location is under test, not wherever this session keeps its weights.
+    monkeypatch.delenv("HIDRA_MODELS_DIR", raising=False)
     root = paths.repo_root()
     assert root is not None, "running from a checkout, so repo_root() should be found"
     assert paths.models_dir() == root / "models"

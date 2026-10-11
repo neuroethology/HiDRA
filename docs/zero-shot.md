@@ -116,10 +116,14 @@ rear = hidra.ethogram("results/", action="rear")      # filtered + sorted
 ## 5. Thresholds
 
 A call is `prob >= threshold`. The bundled thresholds in
-[`derived_thresholds_train.csv`](../src/hidra/assets/derived_thresholds_train.csv) are per-(lab, action) and were
-calibrated on training data (leakage-free), falling back to a pooled per-action value and then to
-0.30 for anything missing. They are a reasonable default on the labs' own footage — they are not
-tuned to yours.
+[`derived_thresholds_train.csv`](../src/hidra/assets/derived_thresholds_train.csv) are per-(lab, action): one
+row per published head, each the best-F1 threshold of that head's ensemble output on the DooM
+*training* videos of its own lab (leakage-free with respect to the held-out test set, and
+calibrated on the model that ships — the table was re-derived for the 2026-10 weights, whose
+probability scales differ from the earlier model's). A head with no row — a column added by
+`--new-head` before `calibrate` has run — falls back to 0.30 (a `pooled__<action>` row, if a
+thresholds CSV carries one, is tried first). They are a reasonable default on the labs' own
+footage — they are not tuned to yours.
 
 Two adjustments, cheapest first:
 

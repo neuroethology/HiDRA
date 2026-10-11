@@ -205,11 +205,17 @@ class MultiTaskPerLabModel(HidraModule):
     CACHED_PREMERGE_DIR / FILM / SKIP_PATH / DISENTANGLE / CORAL branches, all gated on
     environment variables that `hidra.cli` never sets, so they are dead at inference. They
     are intentionally absent here rather than ported unused.
+
+    `shared_head` adds the 38-way `out-proj` layer the model carried up to the 2026-09
+    release (`SHARED_HEAD=1` on the JAX side). The canonical model has no shared head: it is
+    never read at inference, and since the 2026-10 weights it is not trained either. The
+    layer exists here only so the legacy multi-task architecture can still be built and
+    compared against its JAX original.
     """
 
     def __init__(self, d_res, d_ff, d_lstm, n_layers, n_bp, padding, n_actions, n_labs,
                  n_heads, feat_dim, node_dim, unsupervised_model=None,
-                 dtype=torch.float32, device=None):
+                 dtype=torch.float32, device=None, shared_head=False):
         super().__init__()
         self.d_res = d_res
         self.d_ff = d_ff
@@ -237,9 +243,11 @@ class MultiTaskPerLabModel(HidraModule):
             L[f"out-proj-{l}"] = lin(2 * d_lstm, d_res)
             L[f"ff-{l}-in"] = lin(d_res, d_ff)
             L[f"ff-{l}-out"] = lin(d_ff, d_res)
-        L["out-proj"] = lin(d_res, n_actions)
+        if shared_head:
+            L["out-proj"] = lin(d_res, n_actions)
         L["out-proj-perlab"] = lin(d_res, n_heads)
         self.layers = L
+        self.shared_head = bool(shared_head)
 
         # P[lab, action, head] = 1 iff `head` is that (lab, action) pair's column. Routes
         # the 82 per-lab head outputs back into action space for a given lab.
@@ -346,7 +354,10 @@ def load_state_into(module, flat_state, strict=True):
 
     The trunk checkpoints carry one variable the model has no home for -- "norm", a dead
     leftover that `solution.Linear.get_weights` never reads -- so it is expected in the
-    `unexpected` list.
+    `unexpected` list. So are the eight `out-proj/*` tensors of a per-lab checkpoint that
+    carries the shared head (every checkpoint up to the 2026-09 release, and the 2026-10
+    release files, which keep an inert copy for older HiDRA versions) when it is loaded into
+    the canonical head, which has no such layer: nothing read them at inference either way.
     """
     tensors = dict(module.named_parameters())
     tensors.update(dict(module.named_buffers()))
@@ -394,15 +405,17 @@ def build_unsupervised(config, dtype=torch.float32, device=None):
 
 
 def build_perlab(config, unsupervised_model, n_heads, n_actions, n_labs,
-                 dtype=torch.float32, device=None):
-    """The per-lab classifier head, sized for one ensemble config, with random weights."""
+                 dtype=torch.float32, device=None, shared_head=False):
+    """The per-lab classifier head, sized for one ensemble config, with random weights.
+
+    `shared_head=True` builds the legacy multi-task variant with the 38-way `out-proj`."""
     feat_dim = unsupervised_model.n_layers * unsupervised_model.d_res
     node_dim = unsupervised_model.d_res
     return MultiTaskPerLabModel(
         d_res=256, d_ff=768, d_lstm=256, n_layers=3, n_bp=config["num_bodyparts"],
         padding=32, n_actions=n_actions, n_labs=n_labs, n_heads=n_heads,
         feat_dim=feat_dim, node_dim=node_dim, unsupervised_model=unsupervised_model,
-        dtype=dtype, device=device)
+        dtype=dtype, device=device, shared_head=shared_head)
 
 
 def load_unsupervised(config_name, path=None, dtype=torch.float32, device=None, config=None):
@@ -449,7 +462,7 @@ def perlab_checkpoint_path(config_name):
 
 
 def load_perlab(config_name, unsupervised_model=None, path=None, dtype=torch.float32,
-                device=None, config=None, lab_action=None, state=None):
+                device=None, config=None, lab_action=None, state=None, shared_head=False):
     """Build the per-lab head for `config_name`, load its weights, and wire up P.
 
     `unsupervised_model` defaults to loading the matching trunk. `path` defaults to
@@ -460,6 +473,12 @@ def load_perlab(config_name, unsupervised_model=None, path=None, dtype=torch.flo
     checkpoint carries (`hidra.head_table.load_head_table`: a `.heads.json` sidecar or safetensors
     metadata, written for checkpoints whose head is wider than the published 82 columns) and
     otherwise to the published `schema.lab_action_table()`.
+
+    `shared_head=False` (the default) builds the canonical model, which has no shared 38-way
+    head; a checkpoint that carries one (`out-proj/*`, every release up to 2026-09 and the
+    inert copy in the 2026-10 files) loads with those tensors listed as `unexpected` in
+    `model.load_report`. `shared_head=True` builds the legacy multi-task model and then
+    requires them.
     """
     from .. import schema
     from ..head_table import as_pairs, check_head_width, head_table_for
@@ -477,7 +496,7 @@ def load_perlab(config_name, unsupervised_model=None, path=None, dtype=torch.flo
     check_head_width(state, lab_action, source=str(path))
     model = build_perlab(config, unsupervised_model, n_heads=len(lab_action),
                          n_actions=len(schema.ACTIONS), n_labs=len(schema.LABS),
-                         dtype=dtype, device=device).to(device)
+                         dtype=dtype, device=device, shared_head=shared_head).to(device)
     report = load_state_into(model, state)
     if dtype in (torch.float64,):
         model.to(dtype)

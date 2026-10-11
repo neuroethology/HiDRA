@@ -83,25 +83,25 @@ def publish(models_dir=None, repo=DEFAULT_REPO, revision="main", drop_pickles=Tr
     operations += [CommitOperationDelete(path_in_repo=name) for name in deletes]
 
     description = (
-        "safetensors holding the identical float32 values as the pickled JAX checkpoints, "
-        "verified byte-for-byte. safetensors executes no code on load and is read with "
-        "numpy alone, so opening the weights needs neither JAX nor PyTorch. thresholds.pkl "
-        "becomes thresholds.json, removing the last pickle from the load path.\n\n"
-        "Running the JAX backend from these files reproduces a pickle-based run "
-        "bit-identically.\n"
+        "Five self-supervised trunks, five per-lab classifier heads and thresholds.json, as "
+        "safetensors (float32, verified byte-for-byte against the trainer's pickles on "
+        "conversion; readable with numpy alone), plus the model card. The model card "
+        "(README.md) says what changed in this set and how to pin the previous one.\n\n"
+        f"The previous weights are revision {current_sha}:\n\n"
+        f"    hidra-download-models --revision {current_sha}\n"
     )
     if deletes:
         description += (
-            f"\nThe .pkl files are removed. HiDRA versions predating this change resolve "
-            f"them by name; upgrade, or pin the last revision that carried them:\n\n"
+            f"\nThe .pkl files are removed. HiDRA versions predating the safetensors switch "
+            f"resolve them by name; upgrade, or pin a revision that carried them:\n\n"
             f"    hidra-download-models --format pkl --revision {current_sha}\n")
 
     result = api.create_commit(
         repo_id=repo, operations=operations,
-        commit_message=message or "Switch to safetensors weights; add model card",
+        commit_message=message or "Update weights; update model card",
         commit_description=description)
     print(f"\ncommitted: {result.commit_url}")
-    print(f"the last revision carrying .pkl was {current_sha}")
+    print(f"the previous weights were revision {current_sha} -- record it in the model card")
     return result.commit_url
 
 

@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "hidra"
-version = "0.1.0"
+version = "0.2.0"
 description = "HiDRA -- the High-Dimensional Rodent Annotator: per-lab-head mouse behaviour classifier ensemble"
 readme = "README.md"
 requires-python = ">=3.12"

@@ -50,10 +50,10 @@ system CUDA toolkit is needed. CPU-only works but is much slower.
 ### Backends
 
 The models were originally written in JAX and have been ported to PyTorch, which is now the
-default. The two agree to float32 round-off — every thresholded call and bout boundary is
-identical on the published weights — and the PyTorch path is about 8× faster and uses less than
-half the memory. Full numbers, and how the equivalence was established:
-**[docs/pytorch-port.md](docs/pytorch-port.md)**.
+default. The two agree to float32 round-off — on the weights the port was measured against,
+every thresholded call and bout boundary was identical — and the PyTorch path is about 8× faster
+and uses less than half the memory. Full numbers, how the equivalence was established, and
+which weight set each number refers to: **[docs/pytorch-port.md](docs/pytorch-port.md)**.
 
 ```bash
 python predict.py tracking/ --out results/ --pix-per-cm 16 --fps 30                  # torch
@@ -95,6 +95,14 @@ The original pickled JAX checkpoints hold the identical values and are still rea
 are no longer on the Hub's `main`; see [models/README.md](models/README.md) to pin them, to
 convert your own fine-tuned checkpoints (`hidra-convert-weights`), or to publish a new set
 (`hidra-publish-weights`).
+
+**The weights changed in October 2026.** The current set is the retrained self-supervised
+trunks and a per-lab classifier trained *without* the shared cross-lab head the earlier model
+carried (held-out mean F1 over the 82 heads: 0.613, against 0.618 for the shared-head model it
+replaces — the shared head bought nothing measurable, so the simpler model is now canonical).
+The 82 heads and their names are unchanged; the decision thresholds are re-calibrated for the
+new model. A study that must stay on one set should pin a Hub revision (`--revision`). What
+changed, and why: [CHANGELOG.md](CHANGELOG.md).
 
 ## Input
 
@@ -238,18 +246,19 @@ translates into the labels the trainer derives it from. `train` takes `--backend
 (default `torch`); either writes the checkpoint in the same layout, `predict.py --weights` loads
 it on either backend, and `hidra-convert-weights --one` turns it into safetensors. You adopt an
 existing (lab, behaviour) head; for anything else see [docs/new-behaviours.md](docs/new-behaviours.md).
-Add `--cache-features` (and, while iterating, `--ddi-steps 0 --configs 15fps_5bp`) to turn a
-`--mode head` run from an hour per config into seconds. Full walkthrough and caveats:
+Add `--cache-features` (and, while iterating, `--configs 15fps_5bp`) to turn a `--mode head`
+run from an hour per config into seconds. Full walkthrough and caveats:
 **[docs/fine-tuning.md](docs/fine-tuning.md)**.
 
 ## Training from scratch
 
 The two stages behind the published weights — the self-supervised trunk and the supervised
-per-lab tail with its 82-column head — can be re-run with the research code in the package
-(`solution.pretrain`, `train_perlab_heads.py`). It needs the JAX extra, a dataset in the trainer's
-layout, and GPU-days rather than GPU-minutes; the head table (which (lab, behaviour) pairs get a
-column) is declared in `thresholds.json`. **[docs/training.md](docs/training.md)** walks through
-it, including the smoke runs to do before committing a GPU.
+per-lab tail with its 82-column head (and, since the 2026-10 weights, no shared cross-lab head)
+— can be re-run with the research code in the package (`solution.pretrain`,
+`train_perlab_heads.py`). It needs the JAX extra, a dataset in the trainer's layout, and
+GPU-days rather than GPU-minutes; the head table (which (lab, behaviour) pairs get a column) is
+declared in `thresholds.json`. **[docs/training.md](docs/training.md)** walks through it,
+including the smoke runs to do before committing a GPU.
 
 ## Notes / gotchas
 
@@ -269,6 +278,7 @@ it, including the smoke runs to do before committing a GPU.
 
 ```
 pyproject.toml                   # the package (uv sync / pip install)
+CHANGELOG.md                     # what changed in each release of the code and the weights
 predict.py finetune.py download_models.py    # thin shims -> the hidra package
 
 src/hidra/
