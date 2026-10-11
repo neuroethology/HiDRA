@@ -47,7 +47,9 @@ else:
 from hidra.torch.checkpoint import flatten_tree, load_jax_checkpoint
 flat = flatten_tree(load_jax_checkpoint(r"{paths.models_dir()}/15fps_5bp_supervised_perlab_sniffall.pkl"))
 assert "jax" not in sys.modules, "reading a checkpoint pulled in jax"
-assert len(flat) == 185, len(flat)
+# 177 tensors for the canonical head; 185 when the pickle carries the shared 38-way
+# `out-proj` (every release up to 2026-09, and the inert copy in the 2026-10 pickles).
+assert len(flat) in (177, 185), len(flat)
 assert flat["out-proj-perlab/w"].shape == (256, 82)
 assert all(type(v).__name__ == "ndarray" for v in flat.values())
 print("OK", len(flat))
@@ -55,7 +57,7 @@ print("OK", len(flat))
     out = subprocess.run([sys.executable, "-c", script], capture_output=True, text=True,
                          timeout=300)
     assert out.returncode == 0, f"stdout={out.stdout}\nstderr={out.stderr}"
-    assert "OK 185" in out.stdout
+    assert "OK 1" in out.stdout
 
 
 def test_reader_refuses_unexpected_globals(tmp_path):
@@ -87,7 +89,11 @@ def test_flatten_unflatten_roundtrip():
 
 @pytest.mark.parametrize("kind", ["unsupervised", "supervised_perlab_sniffall"])
 def test_safetensors_is_bit_identical_to_pkl(kind, config_name):
-    """Every tensor, byte for byte -- including NaN and -0.0 patterns."""
+    """Every tensor, byte for byte -- including NaN and -0.0 patterns.
+
+    The one permitted difference: a per-lab head converted with `--strip-shared-head` leaves
+    the inert `out-proj/*` tensors out, and says so in its metadata. Everything it keeps must
+    still match the pickle exactly."""
     from hidra import paths
     from hidra.torch.checkpoint import flatten_tree, load_jax_checkpoint, read_metadata, read_state
 
@@ -98,14 +104,17 @@ def test_safetensors_is_bit_identical_to_pkl(kind, config_name):
 
     want = flatten_tree(load_jax_checkpoint(base / f"{config_name}_{kind}.pkl"))
     got = read_state(st)
-    assert set(got) == set(want)
-    for key in want:
+    meta = read_metadata(st)
+    stripped = {k for k in want if k.split("/")[0] in meta.get("dropped_layers", "").split(",")}
+    if stripped:
+        assert kind == "supervised_perlab_sniffall" and all(k.startswith("out-proj/") for k in stripped)
+    assert set(got) == set(want) - stripped
+    for key in got:
         a = np.ascontiguousarray(got[key].cpu().numpy())
         b = np.ascontiguousarray(np.asarray(want[key]))
         assert a.shape == b.shape and a.dtype == b.dtype, key
         assert a.tobytes() == b.tobytes(), f"{key} differs byte-wise"
 
-    meta = read_metadata(st)
     assert meta.get("format") == "hidra-jax-port-v1"
     assert meta.get("source") == f"{config_name}_{kind}.pkl"
 
@@ -152,7 +161,33 @@ def test_convert_one_verifies(tmp_path, config_name):
 
     src = paths.models_dir() / f"{config_name}_supervised_perlab_sniffall.pkl"
     out, n = convert_one(src, tmp_path / "ft.safetensors", verify=True)
-    assert out.is_file() and n == 185
+    assert out.is_file() and n in (177, 185)      # with / without the shared head's 8 tensors
+
+
+def test_strip_shared_head_drops_only_out_proj(tmp_path, config_name):
+    """`--strip-shared-head` must remove exactly the per-lab head's `out-proj/*`, record it in
+    the metadata, keep every other tensor bit-identical, and refuse a trunk (whose `out-proj`
+    is its forecasting output)."""
+    from hidra import paths
+    from hidra.torch.checkpoint import flatten_tree, load_jax_checkpoint, read_metadata, read_state
+    from hidra.torch.convert import SHARED_HEAD_LAYERS, convert_one
+
+    src = paths.models_dir() / f"{config_name}_supervised_perlab_sniffall.pkl"
+    want = flatten_tree(load_jax_checkpoint(src))
+    out, n = convert_one(src, tmp_path / "stripped.safetensors", verify=True,
+                         drop_layers=SHARED_HEAD_LAYERS)
+    got = read_state(out)
+    assert n == len(got) == len([k for k in want if not k.startswith("out-proj/")])
+    assert not any(k.startswith("out-proj/") for k in got)
+    assert "out-proj-perlab/w" in got
+    for key in got:
+        assert np.ascontiguousarray(got[key].numpy()).tobytes() == \
+            np.ascontiguousarray(np.asarray(want[key])).tobytes(), key
+    assert read_metadata(out).get("dropped_layers") == "out-proj"
+
+    trunk = paths.models_dir() / f"{config_name}_unsupervised.pkl"
+    with pytest.raises(ValueError, match="not a per-lab head"):
+        convert_one(trunk, tmp_path / "trunk.safetensors", drop_layers=SHARED_HEAD_LAYERS)
 
 
 def test_zero_dim_tensors_survive_a_roundtrip(tmp_path):
@@ -199,7 +234,12 @@ def test_thresholds_json_roundtrip(tmp_path, config_name):
     from hidra import paths
     from hidra.checkpoints import load_thresholds, save_thresholds
 
-    original = load_thresholds(paths.models_dir() / "thresholds.pkl")
+    src = paths.models_dir() / "thresholds.pkl"
+    if not src.is_file():
+        # The 2026-10 weights were trained and staged from thresholds.json directly; the pickle
+        # exists only in installs that predate the safetensors switch.
+        pytest.skip("no thresholds.pkl in the models dir (json-only weight set)")
+    original = load_thresholds(src)
     path = save_thresholds(tmp_path / "thresholds.json", original)
     back = load_thresholds(path)
     assert back == original, "thresholds changed through JSON"
@@ -233,7 +273,8 @@ def test_publish_plan_is_complete_and_safetensors_only(monkeypatch):
     adds, deletes, sha = publish.plan()
 
     names = [n for n, _ in adds]
-    assert len(names) == 12, names                      # 10 checkpoints + thresholds + card
+    assert len(names) == 13, names                      # 10 checkpoints + thresholds + card + config.json
+    assert names.count("config.json") == 1, "the download-counting manifest must be published"
     assert names.count("README.md") == 1, "the model card must be published"
     assert "thresholds.json" in names
     assert all(n.endswith((".safetensors", ".json", ".md")) for n in names), names
@@ -312,3 +353,42 @@ def test_missing_accepts_either_container(tmp_path):
 
     (tmp_path / "thresholds.pkl").unlink()
     assert missing(str(tmp_path)) == ["thresholds.json"]
+
+
+def test_download_fetches_hub_config_first(tmp_path, monkeypatch):
+    """`config.json` is the Hub's download-counting query file. It must be requested before
+    the weights on every real download, and its absence (older revisions) must not fail."""
+    import huggingface_hub
+
+    from hidra import download_models
+
+    calls = []
+
+    def fake_download(repo_id, filename, revision, local_dir):
+        calls.append(filename)
+        if filename == download_models.HUB_CONFIG:
+            raise huggingface_hub.errors.EntryNotFoundError("no config.json at this revision")
+        (tmp_path / filename).write_bytes(b"x")
+
+    monkeypatch.setattr(huggingface_hub, "hf_hub_download", fake_download)
+    download_models.download(models_dir=str(tmp_path))
+
+    assert calls[0] == download_models.HUB_CONFIG
+    assert calls[1:] == download_models.required_files("safetensors")
+    assert download_models.missing(str(tmp_path)) == []
+    assert download_models.HUB_CONFIG not in download_models.required_files("safetensors"), \
+        "the manifest is for counting, not for inference, so it must not be required"
+
+
+def test_hub_config_manifest():
+    import json
+    import tempfile
+
+    from hidra.publish import hub_config, write_hub_config
+
+    cfg = hub_config()
+    assert cfg["model_type"] == "hidra"
+    assert cfg["configs"] == ["11fps_4bp", "15fps_5bp", "19fps_6bp", "23fps_7bp", "27fps_6bp"]
+    path = write_hub_config(tempfile.mkdtemp())
+    assert path.name == "config.json"
+    assert json.loads(path.read_text()) == cfg

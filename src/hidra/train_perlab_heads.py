@@ -1,26 +1,37 @@
-"""Experiment: per-(lab,behavior) classifier heads, MULTI-TASK with the shared head.
+"""Stage 2 of HiDRA: the supervised per-(lab, behaviour) classifier heads.
 
-The shared model has one Linear(256 -> 37) head where lab info enters only via a
-256-d embedding, so all labs' (e.g.) sniff annotations are averaged into one
-shared sniff weight vector. This experiment adds 88 per-(lab,action) heads so
-inter-lab annotation differences are NOT averaged out -- while keeping the
-shared 37-head so the trunk still trains on ALL data (incl. the 6 train-only
-labs that have no scored head).
+The original shared model had one Linear(256 -> 37) head where lab info enters only
+via a 256-d embedding, so all labs' (e.g.) sniff annotations were averaged into one
+shared sniff weight vector. HiDRA instead gives every (lab, action) pair its own
+column of a per-lab head, so inter-lab annotation differences are NOT averaged out.
 
-Architecture (per config):
+Architecture (per config), the canonical model since the 2026-10 weights:
   frozen forecaster -> merge head -> + 0.1*lab_embedding -> 3x(BiLSTM+FFN) -> x
-  x -> Linear(256->37)   shared head        (trained on ALL 8,790 train videos)
-  x -> Linear(256->88)   per-lab heads       (trained on the 15 competition labs)
-  loss = mean-BCE(shared, 37-space) + mean-BCE(per-lab, 88-space)
-  INFERENCE / val-F1 / final predictions use the 88 per-lab heads.
+  x -> Linear(256->82)   per-lab heads       (trained on the 15 competition labs)
+  loss = mean-BCE(per-lab, 82-space), routed so each video supervises only its own
+         lab's columns. INFERENCE / val-F1 / final predictions read this head.
 
-Label routing: constant P (n_LABS, 37, 88), P[lab,action,j]=1 iff j==idx(lab,action).
+Up to the 2026-09 release the model was MULTI-TASK: a shared Linear(256->38) head
+`out-proj` was trained alongside, with its loss (`nll37`) taken over every video of
+every lab -- including the six train-only labs (CRIM13, CalMS21_*, MABe22_*) that have no
+scored head. A three-way comparison (shared + external labs / shared without CalMS21 /
+no shared head; held-out DooM test, 2026-10-08) found the shared head buys nothing
+measurable (mean F1 over the 82 heads 0.618 / 0.616 / 0.613), so it was dropped. Without
+it the external labs contribute nothing to the loss and the stage-2 dataset can be
+DooM-only. `SHARED_HEAD=1` restores the multi-task architecture and loss for anyone
+reproducing the earlier release; it is also what a checkpoint that carries an `out-proj`
+subtree was trained with (the loaders tolerate that subtree either way -- see
+`run_test_probs_perlab.predict_into` and `hidra.torch.models.load_perlab`).
+
+Label routing: constant P (n_LABS, 38, 82), P[lab,action,j]=1 iff j==idx(lab,action).
   per-lab labels88 = labels37 @ P[lab];  mask88 = mask37 @ P[lab]
   predict prob37   = sigmoid(logits88) @ P[lab]^T  (reuses existing Predictions/F1)
+(The `37`/`88` suffixes in the variable names are historical: 38 actions with sniffall,
+82 head columns in the published table.)
 
 Usage:
-  CUDA_VISIBLE_DEVICES=0 python train_perlab_heads.py --config 15fps_5bp
-  python train_perlab_heads.py --config 15fps_5bp --smoke
+  SNIFFALL=1 CUDA_VISIBLE_DEVICES=0 python -m hidra.train_perlab_heads --config 15fps_5bp
+  SNIFFALL=1 python -m hidra.train_perlab_heads --config 15fps_5bp --smoke
 """
 import argparse
 import os
@@ -59,6 +70,15 @@ if SNIFFALL:
     N_HEADS = len(LAB_ACTION)
     SNIFFALL_COL = np.array([1.0 if a == "sniffall" else 0.0 for (l, a) in LAB_ACTION], "float32")
     OLD_LAB_ACTION = sorted(TH_KEYS)        # existing-model column order (no sniffall)
+
+# SHARED_HEAD=1: the pre-2026-10 MULTI-TASK architecture -- keep the shared 38-way `out-proj`
+# head and add its loss (`nll37`, over every video of every lab) to the per-lab loss. Off by
+# default: the canonical model has no shared head (see the module docstring). A checkpoint
+# trained with SHARED_HEAD=1 carries an `out-proj` subtree; one trained without does not.
+# Both load under either setting of this flag for inference (the subtree is simply unused),
+# but warm-starting a SHARED_HEAD=1 run from a no-shared-head checkpoint leaves `out-proj`
+# at its random init.
+SHARED_HEAD = os.environ.get("SHARED_HEAD") == "1"
 
 # FROZEN_TRUNK=1: warm-start the whole model from the EXISTING trained perlab model,
 # freeze everything except the per-lab head projection (out-proj-perlab), and fit only
@@ -243,6 +263,18 @@ if LABTAIL:
     # "linear-only" add of a new behaviour on top of a lab's already-trained tail (cannot degrade the
     # lab's existing heads). Default (0) trains the whole tail+head.
     LABTAIL_HEAD_ONLY = os.environ.get("LABTAIL_HEAD_ONLY") == "1"
+    # LABTAIL_KEEP_STATS: keep the warm-start checkpoint's input-normalisation statistics (the
+    # m1/m2/n/mean/std of every normalize_input Linear). `Trainer.initial_state` runs a 256-batch
+    # data-dependent init on the fine-tuning videos that re-estimates those statistics for EVERY
+    # layer, frozen ones included -- so under LABTAIL_HEAD_ONLY the "frozen" tail would read its
+    # inputs through statistics it was never trained with (~92% replaced after 256 batches at decay
+    # 0.99). On a new lab's few videos that pinned head-only fine-tunes at F1 ~0.32, below the
+    # zero-shot donor head (0.47); restoring the foundation's statistics after the pass gave
+    # 0.36 -> 0.51 over 3 -> 240 positive seconds (machine B, 2026-10-09). Default: on for
+    # LABTAIL_HEAD_ONLY (the tail is the foundation's, so its statistics should be too), off
+    # otherwise (a trainable tail co-adapts). LABTAIL_KEEP_STATS=0/1 overrides.
+    _ks = os.environ.get("LABTAIL_KEEP_STATS")
+    LABTAIL_KEEP_STATS = LABTAIL_HEAD_ONLY if _ks is None else _ks == "1"
     # LABTAIL_EMB_ONLY=1: keep the SHARED tail blocks (LSTM/FF) frozen at the LOLO foundation's values
     # and train ONLY a new lab-embedding + the head -- tests whether lab-specificity via the embedding
     # alone (the canonical design) suffices for a new lab, without retraining the shared tail.
@@ -406,6 +438,47 @@ _LABS_ENCODE_ORIG = solution.LABS.value_to_idx.__getitem__
 _ACTIONS_ENCODE_ORIG = solution.ACTIONS.value_to_idx.__getitem__
 
 
+INPUT_STATS = ("m1", "m2", "n", "mean", "std")   # solution.Linear's normalize_input running statistics
+
+
+def restore_input_stats(vnode, enode, count=None):
+    """Copy the input-normalisation statistics of every layer in `enode` (a loaded checkpoint
+    tree of arrays) into `vnode` (a `Variable` tree of the same layout), leaving every other
+    variable alone. Returns the new tree; `count` (a one-element list) is incremented once per
+    tensor restored. Layers or statistics the checkpoint lacks, or whose shape differs, are left
+    as they are. This is the `LABTAIL_KEEP_STATS` mechanism (see the flag's comment)."""
+    if solution.is_variable(vnode) or not isinstance(vnode, dict):
+        return vnode
+    out = {}
+    for k, v in vnode.items():
+        e = enode.get(k) if isinstance(enode, dict) else None
+        if (k in INPUT_STATS and solution.is_variable(v) and e is not None
+                and tuple(np.shape(e)) == tuple(np.shape(v.value))):
+            out[k] = solution.Variable(jnp.asarray(np.asarray(e), dtype=v.value.dtype), v.trainable)
+            if count is not None:
+                count[0] += 1
+        else:
+            out[k] = restore_input_stats(v, e, count)
+    return out
+
+
+def model_layer_weights(weights, model, source="the checkpoint"):
+    """The part of a loaded checkpoint tree that `model.set_variables` will bind: one entry per
+    layer of `model`, with a clear error for a missing one.
+
+    Extra top-level entries are dropped rather than carried onto the device. The one that
+    occurs in practice is `out-proj`: a checkpoint trained with the shared head (`SHARED_HEAD=1`,
+    or the 2026-10 release files, which carry an inert copy of it so that older HiDRA versions can
+    still load them) bound to the canonical model, which has no such layer and never read it.
+    """
+    missing = [name for name in model.layers if name not in weights]
+    if missing:
+        hint = (" The checkpoint was trained without the shared head; unset SHARED_HEAD to build "
+                "the canonical model." if missing == ["out-proj"] else "")
+        raise KeyError(f"{source} lacks layer(s) {missing} that the model needs.{hint}")
+    return {name: weights[name] for name in model.layers}
+
+
 def build_P(lab_action=None):
     """P for `lab_action`'s columns; default this module's LAB_ACTION. A checkpoint widened by
     `finetune.py train --new-head` carries its own table (hidra.head_table), which the
@@ -423,6 +496,11 @@ class MultiTaskPerLabModel(solution.SupervisedModel):
         # inference loader passes a checkpoint's own table when it declares extra columns.
         super().__init__(*args, **kwargs)
         self.lab_action = LAB_ACTION if lab_action is None else [tuple(p) for p in lab_action]
+        if not SHARED_HEAD:
+            # SupervisedModel builds the shared 38-way `out-proj`; the canonical per-lab model
+            # has no such layer. Popping it (rather than leaving it unused) keeps the variable
+            # tree, the DDI pass, the EMA and the saved checkpoint free of a head nothing reads.
+            self.layers.pop("out-proj")
         self.layers["out-proj-perlab"] = solution.Linear(self.d_res, len(self.lab_action), self.dtype)
         if SKIP_PATH:                                            # low-rank view of PRE-merge feats -> add to x0
             raw_dim = self.layers["ff-merge-in"].input_dim       # 2*feat_dim (per-node)
@@ -567,7 +645,6 @@ class MultiTaskPerLabModel(solution.SupervisedModel):
             x, x0 = self._trunk_feats(layers, batch, key, return_x0=True)
         else:
             x = self._trunk_feats(layers, batch, key)
-        logits37 = layers["out-proj"].apply(x)
         logits88 = layers["out-proj-perlab"].apply(x)
         labels37, mask37 = self._labels37(batch)
         Pb = self.P[batch["lab_id"]]
@@ -588,15 +665,24 @@ class MultiTaskPerLabModel(solution.SupervisedModel):
                 vid = batch["video_id"].astype("int64")
                 ok = jnp.any(vid[:, None] == jnp.asarray(CURATE_VIDS)[None, :], axis=1).astype(mask88.dtype)
                 mask88 = mask88.at[:, CURATE_COL].multiply(ok)
-        nll37, w37 = self._masked_bce(logits37, labels37, mask37)   # all labs
         nll88, w88 = self._masked_bce(logits88, labels88, mask88)   # competition labs
-        nll = nll88 if (FROZEN_TRUNK or REFIT or LABTAIL) else (nll37 + nll88)
-        metrics = {"nll": (nll, w37 + w88), "nll37": (nll37, w37), "nll88": (nll88, w88)}
+        nll, w = nll88, w88
+        metrics = {"nll88": (nll88, w88)}
+        if SHARED_HEAD:
+            # Legacy multi-task objective: the shared head's loss is taken over every lab. The
+            # warm-start modes always dropped it (the shared head is frozen there and its loss
+            # would only add noise), so the flag only changes the from-scratch objective.
+            logits37 = layers["out-proj"].apply(x)
+            nll37, w37 = self._masked_bce(logits37, labels37, mask37)   # all labs
+            metrics["nll37"] = (nll37, w37)
+            if not (FROZEN_TRUNK or REFIT or LABTAIL):
+                nll, w = nll37 + nll88, w37 + w88
+        metrics["nll"] = (nll, w)
         if CORAL:                                                   # strategy #2: dataset-invariance pressure
             coral = self._coral_loss(x0, batch)
             nll = nll + CORAL_LAMBDA * coral
             metrics["coral"] = (coral, jnp.asarray(1.0))
-            metrics["nll"] = (nll, w37 + w88)
+            metrics["nll"] = (nll, w)
         return (nll, metrics)
 
     def predict(self, layers, batch, key):
@@ -935,6 +1021,28 @@ def train_perlab(config, smoke=False):
         trainer.checkpoint_manager.patience = 10**9
         print(f"[TRAJ] keeping up to {n} checkpoints, early-stop disabled", flush=True)
     trainer.custom_eval_loop = solution.get_custom_eval_loop(trainer)
+    if LABTAIL and LABTAIL_KEEP_STATS:
+        # Keep the warm-start checkpoint's input-normalisation statistics (see LABTAIL_KEEP_STATS
+        # above): run the stock initial_state -- including its data-dependent-init pass, so the
+        # variable tree and the EMA are built exactly as usual -- then put every layer's
+        # m1/m2/n/mean/std back to the values loaded from the source checkpoint. Weights are
+        # untouched (the warm-start copy and LABTAIL_* trainability apply as usual).
+        _keep_src = checkpoints.load_checkpoint(_srcpath)
+        _orig_initial_state = trainer.initial_state
+
+        def _keepstats_initial_state(_orig=_orig_initial_state, _ex=_keep_src):
+            state = _orig()
+            count = [0]
+            state["variables"] = restore_input_stats(state["variables"], _ex, count)
+            # The EMA was seeded from the post-DDI variables; re-seed it from the restored ones so
+            # the saved (EMA) checkpoint carries the foundation's statistics too.
+            values = jax.tree.map(lambda v: v.value, state["variables"], is_leaf=solution.is_variable)
+            state["ema"] = trainer.ema.create_variables(values)
+            print(f"[KEEPSTATS] restored {count[0]} normalisation-statistic tensors from "
+                  f"{os.path.basename(str(_srcpath))} after the data-dependent-init pass", flush=True)
+            return state
+
+        trainer.initial_state = _keepstats_initial_state
     # FROZEN_TRUNK: the val-f1 metric only measures the 88 (warm-started, frozen) heads, so it
     # is flat and best.pkl would be the EARLIEST checkpoint (undertrained sniffall). Capture the
     # EMA weights at every eval and save the LAST (fully-converged sniffall) instead.

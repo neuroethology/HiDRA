@@ -186,10 +186,11 @@ cannot pull the trunk around at all, trains in a fraction of the time, and is th
 attempt.
 
 Either way, **treat a fine-tuned checkpoint as belonging to the lab you adopted** and always pass
-`--labs <that lab>` when predicting with it. Even in `head` mode the other columns are not strictly
-frozen output: training re-estimates the input-normalization statistics (which are shared across
-all 82 head columns) on your data during initialization, so other labs' probability scales can
-drift a little.
+`--labs <that lab>` when predicting with it. In `head` mode the other columns *are* frozen output
+by default: the tail and the head's input-normalization statistics stay exactly as published, and
+only your columns move. Passing `--ddi-steps N` re-estimates those statistics (which are shared
+across all 82 head columns) on your data, after which other labs' probability scales drift a
+little — see §3b for when that is and is not a good idea.
 
 Other knobs: `--steps` (default 8000 per config), `--lr` (default 0.004), `--lr-schedule cosine`
 for a decay that would reach zero at `max(steps, 15000)` — the schedule the LOLO bundle used, so
@@ -247,14 +248,18 @@ alone. It is the same work in the first two rows either way.
 
 Per step that is 560 ms live against 23–31 ms cached, and the same optimisation: the loss
 trajectories overlap. The step loop stops being the cost, which turns the remaining one — the
-**input-statistics pass** — into the thing to think about. Before training, HiDRA re-estimates
-the per-feature mean and standard deviation the head's layers standardize their inputs with, over
-256 batches, exactly as the original trainer does. It is the reason "even in `head` mode the other
-columns are not strictly frozen output" above. `--ddi-steps N` shortens it, and `--ddi-steps 0`
-skips it entirely, keeping the published statistics: the resulting checkpoint then leaves every
-other lab's head bit-identical, at the cost of reading your data through the consortium's
-statistics rather than your own. On a rig close to the adopted lab's that is a reasonable default;
-measure it with §4 on held-out data rather than assuming.
+**input-statistics pass** — into the thing to think about. Before training, the original trainer
+re-estimates the per-feature mean and standard deviation every layer standardizes its inputs with,
+over 256 batches of the fine-tuning data — *every* layer, the frozen ones included. In `tail` mode
+that is right (the tail trains and co-adapts). In `head` mode it is not: the frozen tail then reads
+its inputs through statistics it was never trained with, and on a new lab's few videos that
+pinned head-only fine-tunes at F1 ≈ 0.32, *below* the zero-shot donor head (0.47); keeping the
+published statistics gave 0.36 → 0.51 over 3 → 240 positive seconds of annotation (2026-10-09).
+So since 2026-10 **`head` mode skips the pass by default** (the table's last row), which also makes
+it the fastest variant, and the resulting checkpoint leaves every other lab's head bit-identical.
+`--ddi-steps N` turns the pass back on (N = 256 is the pre-2026-10 behaviour, on either backend);
+`tail` and `embedding` mode keep the original 256 unless you say otherwise. Measure, do not
+assume: §4 on held-out data decides.
 
 What caching does **not** speed up is `tail` mode, where the BiLSTM tail is the trainable part and
 still runs every step: caching `x0` saves the trunk (~30% of the step) and no more. `head` mode
@@ -332,10 +337,10 @@ back to the bundled values, which no longer fit it.
 
 Across backends the two implementations agree to about 1e-3 in probability
 ([pytorch-port.md](pytorch-port.md)), so a frame whose probability lies within that of the
-threshold can be called by one backend and not the other. On the published weights and
-thresholds no such frame occurs; on a freshly calibrated head a handful per video is normal
-(three of 3,600 in the run used for this document, all within 2e-4 of the threshold). Pick one
-backend for a study and stay with it.
+threshold can be called by one backend and not the other. On the weights and thresholds the port
+was measured against (the pre-2026-10 set) no such frame occurred; on a freshly calibrated head a
+handful per video is normal (three of 3,600 in the run used for this document, all within 2e-4 of
+the threshold). Pick one backend for a study and stay with it.
 
 ## What is actually happening
 
@@ -366,6 +371,7 @@ fast paths); [training.md](training.md) lists them and its header comments expla
 | `stop_frame <= start_frame` | your CSV is inclusive-ended — pass `--stop-inclusive` |
 | val-F1 flat at ~0 | the behaviour you are training is not among the behaviours your videos annotate, or has almost no positive frames |
 | worse than zero-shot after fine-tuning | thresholds not re-calibrated (§4); or `tail` mode on very little data — try `--mode head` |
+| `head` mode plateaus well below the zero-shot head it started from | you passed `--ddi-steps N`: the frozen tail now reads its inputs through statistics estimated on your few videos (§3b) — drop the flag |
 | trained fine, predictions look wrong for *other* behaviours | a `tail`-mode checkpoint only speaks for the adopted lab; restrict with `--labs`, or use `--mode head` |
 | stale results after re-annotating | the scratch cache is keyed by video id; `train` clears it by default — do not pass `--reuse-cache` after re-running `prepare` |
 | `FileNotFoundError: …_unsupervised.pkl` with `--backend jax` | an older HiDRA that resolved the pickles by name; the JAX trainer now reads either container — upgrade |

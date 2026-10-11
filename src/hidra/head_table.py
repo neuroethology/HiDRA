@@ -321,9 +321,12 @@ EMBEDDING_LAYER = "lab-embedding"
 def seed_embedding_row(flat, lab, donor):
     """Copy `donor`'s row of the lab embedding into `lab`'s, in a shallow copy of `flat`.
 
-    A head-free slot's row was trained only through the shared 38-way head, on that
-    consortium dataset; starting it from a lab whose recordings resemble yours places your
-    data where that lab's tail features already make sense. This is `DONOR_LAB` in
+    A head-free slot's row is untrained in the canonical (2026-10) weights: with no shared
+    head, a lab without head columns receives no gradient, so its row is the random
+    initialisation (in the pre-2026-10 weights it was trained through the shared 38-way head
+    on that consortium dataset). Starting it from a lab whose recordings resemble yours
+    places your data where that lab's tail features already make sense, and is strongly
+    recommended for `--mode head`, which never trains the row. This is `DONOR_LAB` in
     `train_perlab_heads.py`.
     """
     from . import schema

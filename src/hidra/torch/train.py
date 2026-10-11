@@ -16,8 +16,12 @@ Three details of the original are easy to miss and are reproduced deliberately:
 * **Data-dependent init runs even on a warm start.** `Trainer.initial_state` runs 256
   batches at `stage="init"` after `create_variables`, so the classifier head's input
   standardization statistics are re-calibrated on the new data even when every weight was
-  copied from a published checkpoint. Skipping it would leave the head reading its inputs
-  through the source lab's statistics.
+  copied from a published checkpoint -- for EVERY layer of the head module, frozen ones
+  included. That is right when the tail trains (it co-adapts) and wrong when it does not:
+  in head-only mode the frozen tail would read its inputs through statistics it was never
+  trained with. The driver therefore skips the pass in `head` mode by default
+  (`LABTAIL_DDI_STEPS`, see `train_perlab.env_settings`), mirroring `LABTAIL_KEEP_STATS`
+  on the JAX side.
 * **The frozen trunk is excluded from that.** The trunk is held outside the head's layer
   dict and pinned to `stage="eval"` at construction, so `set_stage` never reaches it and
   its statistics stay put. The port keeps the trunk out of the module tree for the same
@@ -260,14 +264,15 @@ def ddi_forward(head, batch):
     """One data-dependent-init pass: exactly the layers `compute_loss` applies.
 
     It is not enough to run `trunk_feats`. `Trainer.get_ddi_loop` calls `compute_loss`,
-    which also applies BOTH output projections -- the shared 38-way head and the 82-way
-    per-lab head -- so their input statistics get calibrated too. Under LABTAIL the shared
-    head's *loss* is discarded, but the layer is still evaluated, so it still sees data.
-    Calibrating only the trunk would leave `out-proj-perlab` reading its inputs through the
-    source lab's statistics -- with the head layer being the one thing every mode trains.
+    which also applies the output projection(s), so their input statistics get calibrated
+    too. Calibrating only the trunk would leave `out-proj-perlab` reading its inputs through
+    the source lab's statistics -- with the head layer being the one thing every mode trains.
+    A legacy head built with `shared_head=True` also carries the 38-way `out-proj`; the JAX
+    original evaluates it even where its loss is discarded, so it is visited here too.
     """
     x = head.trunk_feats(batch)
-    head.layers["out-proj"](x)
+    if "out-proj" in head.layers:
+        head.layers["out-proj"](x)
     head.layers["out-proj-perlab"](x)
     return x
 
@@ -279,9 +284,10 @@ def perlab_loss(head, batch, head_columns=None, include_shared=False):
     supervision to the adopted lab's chosen behaviours. Without it, a single head inside a
     joint 82-way masked BCE receives roughly 1/82 of the gradient signal.
 
-    `include_shared` adds the 38-way shared head's loss, which the original does for
-    foundation training but *not* for LABTAIL fine-tuning (the shared head is frozen there
-    and its loss would only add noise).
+    `include_shared` adds the 38-way shared head's loss -- the pre-2026-10 foundation
+    objective (`SHARED_HEAD=1`), never used for LABTAIL fine-tuning, where the shared head
+    was frozen and its loss would only add noise. It needs a head built with
+    `shared_head=True`.
     """
     return perlab_loss_from_feats(head, head.trunk_feats(batch), batch, head_columns,
                                   include_shared)
@@ -310,6 +316,9 @@ def perlab_loss_from_feats(head, x, batch, head_columns=None, include_shared=Fal
     metrics = {"nll_perlab": (float(nll.detach()), float(w.detach()))}
 
     if include_shared:
+        if "out-proj" not in head.layers:
+            raise ValueError("include_shared needs the legacy shared head; build the model with "
+                             "shared_head=True (the canonical model has no `out-proj` layer)")
         logits_shared = head.layers["out-proj"](x)
         nll_shared, w_shared = masked_bce(logits_shared, labels, mask)
         metrics["nll_shared"] = (float(nll_shared.detach()), float(w_shared.detach()))

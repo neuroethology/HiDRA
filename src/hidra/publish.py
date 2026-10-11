@@ -18,7 +18,7 @@ import sys
 from pathlib import Path
 
 from . import paths
-from .download_models import CONFIGS, DEFAULT_REPO
+from .download_models import CONFIGS, DEFAULT_REPO, HUB_CONFIG
 
 MODEL_CARD = paths.ASSETS_DIR / "model_card.md"
 
@@ -27,8 +27,48 @@ CHECKPOINT_STEMS = ([f"{c}_unsupervised" for c in CONFIGS]
                     + [f"{c}_supervised_perlab_sniffall" for c in CONFIGS])
 
 
+def hub_config():
+    """The `config.json` manifest published next to the weights.
+
+    HiDRA does not read it. It exists so that the Hub counts downloads: the Hub's statistics
+    count requests for `config.json` (its default "query file"), not for weight files, and
+    `hidra-download-models` fetches it first on every install. The contents describe the
+    release for anyone browsing the repo.
+    """
+    try:
+        from importlib.metadata import version
+        hidra_version = version("hidra")
+    except Exception:
+        hidra_version = "unknown"
+    return {
+        "model_type": "hidra",
+        "library_name": "hidra",
+        "hidra_version": hidra_version,
+        "configs": list(CONFIGS),
+        "files": {
+            "trunk": "{config}_unsupervised.safetensors",
+            "classifier": "{config}_supervised_perlab_sniffall.safetensors",
+            "head_table": "thresholds.json",
+        },
+        "repository": "https://github.com/neuroethology/HiDRA",
+        "note": ("Not read by HiDRA. Fetched first by hidra-download-models so that the Hub's "
+                 "download statistics count each install."),
+    }
+
+
+def write_hub_config(directory):
+    """Write the manifest into `directory`; returns its path."""
+    import json
+
+    path = Path(directory) / HUB_CONFIG
+    path.write_text(json.dumps(hub_config(), indent=2) + "\n")
+    return path
+
+
 def plan(models_dir=None, drop_pickles=True, repo=DEFAULT_REPO, revision="main"):
     """Work out what to add and what to remove. Returns (adds, deletes, current_sha)."""
+    import tempfile
+
     from huggingface_hub import HfApi
 
     models_dir = Path(models_dir or paths.models_dir())
@@ -49,6 +89,7 @@ def plan(models_dir=None, drop_pickles=True, repo=DEFAULT_REPO, revision="main")
     if not MODEL_CARD.is_file():
         sys.exit(f"ERROR: model card not found at {MODEL_CARD}")
     adds.append(("README.md", MODEL_CARD))
+    adds.append((HUB_CONFIG, write_hub_config(tempfile.mkdtemp(prefix="hidra-publish-"))))
 
     api = HfApi()
     info = api.model_info(repo, revision=revision)
@@ -83,25 +124,27 @@ def publish(models_dir=None, repo=DEFAULT_REPO, revision="main", drop_pickles=Tr
     operations += [CommitOperationDelete(path_in_repo=name) for name in deletes]
 
     description = (
-        "safetensors holding the identical float32 values as the pickled JAX checkpoints, "
-        "verified byte-for-byte. safetensors executes no code on load and is read with "
-        "numpy alone, so opening the weights needs neither JAX nor PyTorch. thresholds.pkl "
-        "becomes thresholds.json, removing the last pickle from the load path.\n\n"
-        "Running the JAX backend from these files reproduces a pickle-based run "
-        "bit-identically.\n"
+        "Five self-supervised trunks, five per-lab classifier heads and thresholds.json, as "
+        "safetensors (float32, verified byte-for-byte against the trainer's pickles on "
+        "conversion; readable with numpy alone), plus the model card and a config.json "
+        "manifest (fetched first by hidra-download-models so the Hub counts downloads). The "
+        "model card (README.md) says what changed in this set and how to pin the previous "
+        "one.\n\n"
+        f"The previous weights are revision {current_sha}:\n\n"
+        f"    hidra-download-models --revision {current_sha}\n"
     )
     if deletes:
         description += (
-            f"\nThe .pkl files are removed. HiDRA versions predating this change resolve "
-            f"them by name; upgrade, or pin the last revision that carried them:\n\n"
+            f"\nThe .pkl files are removed. HiDRA versions predating the safetensors switch "
+            f"resolve them by name; upgrade, or pin a revision that carried them:\n\n"
             f"    hidra-download-models --format pkl --revision {current_sha}\n")
 
     result = api.create_commit(
         repo_id=repo, operations=operations,
-        commit_message=message or "Switch to safetensors weights; add model card",
+        commit_message=message or "Update weights; update model card",
         commit_description=description)
     print(f"\ncommitted: {result.commit_url}")
-    print(f"the last revision carrying .pkl was {current_sha}")
+    print(f"the previous weights were revision {current_sha} -- record it in the model card")
     return result.commit_url
 
 

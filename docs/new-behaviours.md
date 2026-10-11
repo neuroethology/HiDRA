@@ -129,10 +129,13 @@ Two things differ from §4:
 - **`--seed-from <DonorLab>`** — a bare lab name rather than a `Lab,action` pair. Each new
   column starts from that lab's column of the *same action* (here LyricalHare's `attack` and
   `rear`), and the lab's **embedding row** is seeded from the donor's too. A head-free slot's
-  embedding row was only ever trained through the shared 38-way head on that consortium dataset,
-  so starting it at a lab whose recordings resemble yours puts your data where the tail's
-  features already make sense. A column whose action the donor lacks falls back to a fresh init,
-  and the run says so.
+  embedding row is **untrained** in the 2026-10 weights: with no shared head, a lab without head
+  columns never received a gradient, so its row is the random initialisation (in the earlier
+  weights it had at least been trained through the shared 38-way head). Starting it at a lab whose
+  recordings resemble yours puts your data where the tail's features already make sense; without
+  a donor, `--mode head` would train your columns on top of a meaningless embedding, so pass a
+  donor or use `--mode embedding` / `--mode tail`, which train the row. A column whose action the
+  donor lacks falls back to a fresh init, and the run says so.
 - **`--mode tail`** is the point of doing it this way. With your own lab row you can retrain the
   whole per-lab tail without making any *published* lab's head meaningless — the checkpoint
   speaks for your lab, which is what `--labs` selects anyway. This is the "new-lab adaptation"
@@ -191,9 +194,10 @@ provide.
 
 ## 5. The name is not in the vocabulary at all
 
-Adding a name to `schema.ACTIONS` changes the width of the shared 38-way head and the label space
-every checkpoint was trained in, so it is a schema change followed by the full stage-2 retrain of
-§4 — and the new name would exist only in checkpoints trained with it.
+Adding a name to `schema.ACTIONS` changes the label space every checkpoint was trained in (the
+width of the routing matrix `P`, and of the shared 38-way head where a checkpoint still has one),
+so it is a schema change followed by the full stage-2 retrain of §4 — and the new name would exist
+only in checkpoints trained with it.
 
 The practical alternative is to **repurpose a column**: a head column learns whatever its label
 marks, and the name is just a key. Adopt a lab whose head for some vocabulary name you do not

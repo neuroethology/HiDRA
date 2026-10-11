@@ -24,6 +24,10 @@ from . import paths
 
 # The Hub repo holding the weights. Override with --repo / $HIDRA_HF_REPO.
 DEFAULT_REPO = os.environ.get("HIDRA_HF_REPO", "Neuroethology/HiDRA")
+# `main` follows the latest upload. The weights changed wholesale in 2026-10 (retrained trunks,
+# per-lab classifier trained without the shared head; see CHANGELOG.md), so a study that must
+# stay on one set should pin a revision here or with --revision / $HIDRA_HF_REVISION: the
+# model card on the Hub lists the commit sha of each release.
 DEFAULT_REVISION = os.environ.get("HIDRA_HF_REVISION", "main")
 
 CONFIGS = ["11fps_4bp", "15fps_5bp", "19fps_6bp", "23fps_7bp", "27fps_6bp"]
@@ -41,6 +45,13 @@ FORMATS = {
     "pkl": ([f"{s}.pkl" for s in STEMS], "thresholds.pkl"),
 }
 DEFAULT_FORMAT = os.environ.get("HIDRA_WEIGHTS_FORMAT", "safetensors")
+
+# A small manifest the publisher writes next to the weights. It is not needed to run HiDRA;
+# it is fetched first on every download so that the Hub's download statistics see the
+# install. The Hub counts a model download only when one of a few "query files" is requested
+# (`config.json` by default -- see huggingface.co/docs/hub/models-download-stats), and none
+# of the weight files has such a name. Older revisions do not carry it, which is fine.
+HUB_CONFIG = "config.json"
 
 # Kept for callers that import it; the default-format file list.
 REQUIRED = FORMATS[DEFAULT_FORMAT][0] + [FORMATS[DEFAULT_FORMAT][1]]
@@ -115,6 +126,18 @@ def _other_format_name(fname):
     return None
 
 
+def _fetch_hub_config(repo, revision, models_dir):
+    """Fetch the manifest so the download is counted. Missing on older revisions: skip."""
+    from huggingface_hub import hf_hub_download
+
+    try:
+        hf_hub_download(repo_id=repo, filename=HUB_CONFIG, revision=revision,
+                        local_dir=models_dir)
+    except Exception as exc:
+        if not _is_missing_file(exc):
+            raise
+
+
 def download(repo=DEFAULT_REPO, revision=DEFAULT_REVISION, models_dir=None, force=False,
              fmt=None):
     models_dir = str(paths.models_dir()) if models_dir is None else models_dir
@@ -133,6 +156,7 @@ def download(repo=DEFAULT_REPO, revision=DEFAULT_REVISION, models_dir=None, forc
 
     print(f"Fetching {len(todo)} {fmt} file(s) from {repo} (revision {revision}) "
           f"into {models_dir}")
+    _fetch_hub_config(repo, revision, models_dir)
     for i, fname in enumerate(todo, 1):
         print(f"  [{i}/{len(todo)}] {fname}", flush=True)
         try:

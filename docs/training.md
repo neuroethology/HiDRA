@@ -163,17 +163,40 @@ SNIFFALL=1 python -m hidra.train_perlab_heads --config 15fps_5bp
 Once per config, after that config's stage-1 trunk is in `HIDRA_MODELS_DIR` (published or your
 own). With no experiment flags set, `train_perlab_heads.py` trains the **whole supervised model
 from scratch** on top of the frozen trunk — feature merge, lab embedding, the three BiLSTM/FFN
-blocks, and both heads:
-
-- the shared 38-way head `out-proj`, whose loss is taken over every video of every lab so the
-  tail sees all the data, including the six train-only labs that have no scored head;
-- the per-lab head `out-proj-perlab`, one column per (lab, behaviour), whose loss is routed so each
-  video supervises only its own lab's columns. Inference reads only this head.
+blocks, and the per-lab head `out-proj-perlab`: one column per (lab, behaviour), with the loss
+routed so each video supervises only its own lab's columns. Inference reads this head and
+nothing else.
 
 Adam at 0.004, batch 128, up to 50,000 steps, validation F1 (per-lab heads, competition labs)
-every 2,000 steps with 10,000 steps of patience, EMA weights. The result is copied to
-`$HIDRA_MODELS_DIR/{config}_supervised_perlab_sniffall.pkl`. Measured on one A6000: roughly
-0.3–0.7 s per step, so 4–10 hours per config at the full budget.
+every 2,000 steps with 10,000 steps of patience, EMA weights at the best validation step. The
+result is copied to `$HIDRA_MODELS_DIR/{config}_supervised_perlab_sniffall.pkl`. Measured on one
+A6000: roughly 0.3–0.7 s per step, so 4–10 hours per config at the full budget. This is the
+recipe behind the 2026-10 weights (trained 2026-10-07/08 on the retrained trunks; held-out DooM
+test, mean F1 over the 82 heads with train-calibrated thresholds: 0.613).
+
+**The shared head is gone.** Up to the 2026-09 release the stage-2 model was multi-task: a shared
+38-way head `out-proj` was trained alongside, its loss taken over every video of every lab, so
+that the tail also saw the six train-only labs (CRIM13, CalMS21_*, MABe22_*) that have no scored
+head. A three-way comparison on the retrained trunks (2026-10-08) found it buys nothing
+measurable — mean held-out F1 0.618 with the shared head and the external labs, 0.616 with the
+shared head but without CalMS21, 0.613 with no shared head — so the canonical model drops it.
+Two consequences:
+
+- **The external labs no longer influence stage 2.** Without a shared head, a video of a lab with
+  no head columns contributes zero loss, so the stage-2 tree can be **DooM-only**: the annotated
+  videos of the 15 competition labs. Staging CRIM13 / CalMS21 alongside is harmless but
+  pointless (the 2026-10 run still had them in the tree; they did nothing). The lab-embedding
+  rows of the head-free labs therefore stay at their random initialisation, which is why
+  [new-behaviours.md §4b](new-behaviours.md) recommends `--seed-from <DonorLab>` when adopting
+  such a slot.
+- **Checkpoints have no `out-proj` subtree.** The 2026-10 release *pickles* carry an inert copy of
+  the previous model's `out-proj`, spliced in so HiDRA versions predating this change can still
+  open them; the safetensors on the Hub do not (`hidra-convert-weights --strip-shared-head`).
+  Both loaders bind only the layers the model has, so either kind of file works.
+
+`SHARED_HEAD=1` restores the multi-task architecture and objective for reproducing the earlier
+release; its checkpoints carry `out-proj` and still load into the canonical model, where the
+layer is ignored.
 
 **The head table.** The columns of `out-proj-perlab` — which (lab, behaviour) pairs get a
 classifier, in which order — are the keys of `thresholds.json` in `HIDRA_MODELS_DIR`, minus
@@ -233,7 +256,9 @@ is the map:
 
 | variable | what it does |
 |---|---|
+| `SHARED_HEAD=1` | the pre-2026-10 multi-task architecture: keep the shared 38-way `out-proj` and add its all-labs loss (§3) |
 | `LABTAIL=<lab>` (+ `LABTAIL_ACTIONS`, `LABTAIL_VIDS`, `LABTAIL_HEAD_ONLY`, `LABTAIL_EMB_ONLY`, `LABTAIL_TAG`, `LABTAIL_OUTDIR`, `LABTAIL_SEED`) | new-lab adaptation — what `finetune.py train` sets |
+| `LABTAIL_KEEP_STATS=0/1` | keep the warm-start checkpoint's input-normalisation statistics instead of re-estimating them on the fine-tuning videos (default on under `LABTAIL_HEAD_ONLY`, off otherwise; `finetune.py train --ddi-steps` sets it — [fine-tuning.md §3b](fine-tuning.md#3b-making-it-fast)) |
 | `LABTAIL_FRESH=1` | re-initialise the tail + head instead of warm-starting (cold start) |
 | `LABTAIL_SRC=<file>` | warm-start from a different checkpoint, e.g. a LOLO foundation |
 | `LABTAIL_TUNE_MERGE=1` | also fine-tune the feature merge (needs the live SSL path) |

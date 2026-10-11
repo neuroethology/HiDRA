@@ -23,7 +23,7 @@ import jax
 import jax.numpy as jnp
 
 from . import checkpoints, head_table, paths, solution
-from .train_perlab_heads import LAB_ACTION, MultiTaskPerLabModel
+from .train_perlab_heads import LAB_ACTION, MultiTaskPerLabModel, model_layer_weights
 
 OUT_DIR = str(paths.dataset_dir().parent / "analysis_outputs" / "test_predictions" / "perlab")
 SNIFFALL = bool(os.environ.get("SNIFFALL"))          # load the namespaced 93-head sniffall model + its heads
@@ -65,6 +65,11 @@ def predict_into(config, predictions, num_epochs, dtype):
         n_bp=config["num_bodyparts"], padding=32, dtype=dtype,
         unsupervised_model=(um, upath), lab_action=table)
     sm.set_context({"stage": "eval"})
+    # Bind exactly the model's layers. A checkpoint may carry more -- the inert shared head
+    # `out-proj` of a file trained with SHARED_HEAD=1, or of the 2026-10 release files, which
+    # keep a copy of it for older HiDRA versions -- and the canonical model has no layer to
+    # bind it to, so it is dropped here (with a clear error if a layer is instead missing).
+    weights = model_layer_weights(weights, sm, source=str(ckpt))
     # Force every leaf onto the device as a JAX array. hidra.checkpoints deliberately hands
     # back plain numpy (so it needs no JAX), and a numpy-valued weight makes
     # `Embedding.apply`'s `weights["w"][indices]` pass a traced index to numpy, which dies
