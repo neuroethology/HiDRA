@@ -53,6 +53,7 @@ consume. Inference averages all five, so all five checkpoints are needed.
 | `{config}_unsupervised.safetensors` | 5 | self-supervised trunk (frozen forecaster), 421 tensors |
 | `{config}_supervised_perlab_sniffall.safetensors` | 5 | per-lab classifier: feature merge, lab embedding, 3 × (BiLSTM + FFN) tail, one 82-column linear head; 177 tensors, no shared head |
 | `thresholds.json` | 1 | the head table: which (lab, action) pairs have a column, in which order (its threshold values are not used; the package bundles the calibrated ones) |
+| `config.json` | 1 | a manifest describing the release; not read by HiDRA, fetched first by `hidra-download-models` so the Hub's download statistics count each install |
 
 Each config's trunk and head are loaded together; the head consumes the trunk's features.
 `{config}` is one of `11fps_4bp`, `15fps_5bp`, `19fps_6bp`, `23fps_7bp`, `27fps_6bp`.

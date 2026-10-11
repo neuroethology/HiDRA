@@ -273,7 +273,8 @@ def test_publish_plan_is_complete_and_safetensors_only(monkeypatch):
     adds, deletes, sha = publish.plan()
 
     names = [n for n, _ in adds]
-    assert len(names) == 12, names                      # 10 checkpoints + thresholds + card
+    assert len(names) == 13, names                      # 10 checkpoints + thresholds + card + config.json
+    assert names.count("config.json") == 1, "the download-counting manifest must be published"
     assert names.count("README.md") == 1, "the model card must be published"
     assert "thresholds.json" in names
     assert all(n.endswith((".safetensors", ".json", ".md")) for n in names), names
@@ -352,3 +353,42 @@ def test_missing_accepts_either_container(tmp_path):
 
     (tmp_path / "thresholds.pkl").unlink()
     assert missing(str(tmp_path)) == ["thresholds.json"]
+
+
+def test_download_fetches_hub_config_first(tmp_path, monkeypatch):
+    """`config.json` is the Hub's download-counting query file. It must be requested before
+    the weights on every real download, and its absence (older revisions) must not fail."""
+    import huggingface_hub
+
+    from hidra import download_models
+
+    calls = []
+
+    def fake_download(repo_id, filename, revision, local_dir):
+        calls.append(filename)
+        if filename == download_models.HUB_CONFIG:
+            raise huggingface_hub.errors.EntryNotFoundError("no config.json at this revision")
+        (tmp_path / filename).write_bytes(b"x")
+
+    monkeypatch.setattr(huggingface_hub, "hf_hub_download", fake_download)
+    download_models.download(models_dir=str(tmp_path))
+
+    assert calls[0] == download_models.HUB_CONFIG
+    assert calls[1:] == download_models.required_files("safetensors")
+    assert download_models.missing(str(tmp_path)) == []
+    assert download_models.HUB_CONFIG not in download_models.required_files("safetensors"), \
+        "the manifest is for counting, not for inference, so it must not be required"
+
+
+def test_hub_config_manifest():
+    import json
+    import tempfile
+
+    from hidra.publish import hub_config, write_hub_config
+
+    cfg = hub_config()
+    assert cfg["model_type"] == "hidra"
+    assert cfg["configs"] == ["11fps_4bp", "15fps_5bp", "19fps_6bp", "23fps_7bp", "27fps_6bp"]
+    path = write_hub_config(tempfile.mkdtemp())
+    assert path.name == "config.json"
+    assert json.loads(path.read_text()) == cfg

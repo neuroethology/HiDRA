@@ -60,6 +60,9 @@ Held-out mean F1 over the 82 heads is 0.613, which is within noise of the previo
   modes are unchanged.
 - Model card, README and the docs describe the new model. The model card lists the revision of
   the previous weights.
+- The Hub repo gains a `config.json` manifest, and `hidra-download-models` fetches it before the
+  weights, so that the Hub's download statistics count each install (they count requests for
+  `config.json`, not for weight files, and were stuck at zero).
 - Version 0.1.0 → 0.2.0.
 
 ## 0.1.0
