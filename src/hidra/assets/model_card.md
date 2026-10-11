@@ -151,7 +151,7 @@ so the simpler model is now canonical. What that means for you:
   ```
 
   and pair them with that release's thresholds (`--thresholds`). This set is revision
-  `<sha of the 2026-10 upload>`  <!-- TODO: fill in at publish time -->.
+  `b5b56d316117de5900832de2dea6f2b7fea6f75f`.
 - **Checkpoints no longer carry a shared head** (`out-proj`). HiDRA 0.2.0 and later build the
   model without it and still read older checkpoints that have one. HiDRA versions older than
   0.2.0 cannot load these safetensors (they expect that subtree): upgrade, or pin the revision

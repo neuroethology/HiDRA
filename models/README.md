@@ -28,7 +28,7 @@ between checkouts.
 
 | weights | what | pin with |
 |---|---|---|
-| **2026-10** (current `main`) | retrained self-supervised trunks (2026-10-06/07) and a per-lab classifier trained **without the shared cross-lab head** (2026-10-07/08); same 82 heads, re-calibrated thresholds; held-out mean F1 0.613 | `--revision <sha of the 2026-10 upload; see the model card>` |
+| **2026-10** (current `main`) | retrained self-supervised trunks (2026-10-06/07) and a per-lab classifier trained **without the shared cross-lab head** (2026-10-07/08); same 82 heads, re-calibrated thresholds; held-out mean F1 0.613 | `--revision b5b56d316117de5900832de2dea6f2b7fea6f75f` |
 | 2026-09 and earlier | the multi-task model (per-lab head + shared 38-way head), trained on the original trunks | `--revision 6b9770c99f9e6e20a89f7c2b68169a72b14631e5` (safetensors); its pickles: `--format pkl --revision 4147d4fce1c46f7d56fdbf5dcc3e1e3b2888ba00` |
 
 The model card on the Hub (`README.md` there, `src/hidra/assets/model_card.md` here) carries the
