@@ -66,6 +66,27 @@ ALL_CONFIGS = ["11fps_4bp", "15fps_5bp", "19fps_6bp", "23fps_7bp", "27fps_6bp"]
 LAB_ID = "userdata"          # arbitrary tracking-folder tag; must NOT be 'MABe22_movies'
 DEFAULT_THR = 0.30
 THR_CSV = str(paths.thresholds_csv())
+BOUT_COLS = ["subject", "target", "lab", "action", "start_frame", "stop_frame", "n_frames",
+             "mean_prob", "threshold"]
+
+
+def visible_gpu(gpu=None):
+    """CUDA_VISIBLE_DEVICES for the inference/training subprocesses.
+
+    A scheduler (SLURM, ...) hands a job its GPUs through CUDA_VISIBLE_DEVICES, and an empty
+    value means CPU only; both are kept. `gpu` N picks the N-th visible device, as torch's
+    cuda:N would. With neither, GPU 0.
+    """
+    have = os.environ.get("CUDA_VISIBLE_DEVICES")
+    if gpu is None:
+        return "0" if have is None else have
+    devices = [d.strip() for d in have.split(",") if d.strip()] if have else []
+    if not devices or not str(gpu).isdigit():
+        return str(gpu)
+    if int(gpu) >= len(devices):
+        sys.exit(f"ERROR: --gpu {gpu}, but CUDA_VISIBLE_DEVICES={have} makes only "
+                 f"{len(devices)} GPU(s) visible")
+    return devices[int(gpu)]
 
 
 def _schema():
@@ -288,7 +309,7 @@ def runs(mask):
 
 
 def run(folder, jobs=None, labs=None, actions=None, subject="*", target="*",
-        out="doom_predictions", pix_per_cm=None, fps=None, gpu="0", output="both",
+        out="doom_predictions", pix_per_cm=None, fps=None, gpu=None, output="both",
         keep_work=False, weights=None, thresholds=THR_CSV, threshold=None, configs=None,
         backend="torch"):
     """Run the ensemble over a folder of tracking parquets / .slp files and write bouts/frames
@@ -346,6 +367,9 @@ def run(folder, jobs=None, labs=None, actions=None, subject="*", target="*",
     allbp, canon7 = bodypart_schema()
     os.makedirs(out, exist_ok=True)
     ds = os.path.abspath(os.path.join(out, "_work"))
+    # Start clean: the inference driver skips any lab whose store already exists, so a
+    # leftover from an earlier run (--keep-work, or interrupted) would be reported as this one.
+    shutil.rmtree(ds, ignore_errors=True)
     tdir = os.path.join(ds, "custom_tracking", LAB_ID)
     outstore = os.path.join(ds, "perlab_allbeh")
     os.makedirs(tdir, exist_ok=True); os.makedirs(outstore, exist_ok=True)
@@ -377,9 +401,11 @@ def run(folder, jobs=None, labs=None, actions=None, subject="*", target="*",
 
     env = dict(os.environ, SNIFFALL="1", PREDICT_BATCH="64", XLA_FLAGS="--xla_gpu_autotune_level=0",
                XLA_PYTHON_CLIENT_PREALLOCATE="false",
-               CUDA_VISIBLE_DEVICES=str(gpu), CUSTOM_DIR=ds, CUSTOM_CSV="manifest.csv",
+               CUDA_VISIBLE_DEVICES=visible_gpu(gpu), CUSTOM_DIR=ds, CUSTOM_CSV="manifest.csv",
                CUSTOM_MODE="custom", CUSTOM_OUT=outstore, HIDRA_BACKEND=backend,
                PERLAB_WORKDIR=f"/dev/shm/doom_predict_{os.getpid()}")
+    # Fewer fragmentation OOMs on small GPUs (8 GB); a value already set in the shell wins.
+    env.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
     if weights:
         env["HIDRA_PERLAB_CKPT"] = os.path.abspath(weights)   # resolved here, before the subprocess
         print(f"using fine-tuned per-lab weights: {weights}")
@@ -399,8 +425,13 @@ def run(folder, jobs=None, labs=None, actions=None, subject="*", target="*",
         r = subprocess.run([sys.executable, "-m", "hidra.run_allbehaviors_perlab",
                             "--dataset", "custom", "--embedding-lab", lab, "--epochs", "1",
                             "--backend", backend], env=env)
-        if r.returncode != 0:
-            print(f"  WARNING: {lab} inference exited {r.returncode}; skipping its outputs")
+        if r.returncode != 0 or not os.path.isfile(os.path.join(outstore, f"{lab}.pkl")):
+            # Writing the ethogram without this lab would read as "no behaviour".
+            shutil.rmtree(env["PERLAB_WORKDIR"], ignore_errors=True)
+            if not keep_work:
+                shutil.rmtree(ds, ignore_errors=True)
+            sys.exit(f"ERROR: {lab} inference failed (exit {r.returncode}); its output above "
+                     f"says why. No predictions were written.")
     shutil.rmtree(env["PERLAB_WORKDIR"], ignore_errors=True)
 
     getthr = load_get_threshold(thresholds, threshold); anames = action_names()
@@ -434,7 +465,8 @@ def run(folder, jobs=None, labs=None, actions=None, subject="*", target="*",
                     frames.append(pd.DataFrame(dict(frame=idx, subject=subj, target=tgt, lab=lab, action=act,
                                                     prob=pr, call=call.astype(np.int8))))
         if output in ("both", "calls"):
-            pd.DataFrame(bouts).to_csv(os.path.join(out, f"{stem}.bouts.csv"), index=False)
+            pd.DataFrame(bouts, columns=BOUT_COLS).to_csv(os.path.join(out, f"{stem}.bouts.csv"),
+                                                          index=False)
         if output in ("both", "probs") and frames:
             pd.concat(frames, ignore_index=True).to_parquet(os.path.join(out, f"{stem}.frames.parquet"))
         written.append(stem)
@@ -463,7 +495,8 @@ def main():
     ap.add_argument("--out", default="doom_predictions", help="output folder (default: doom_predictions)")
     ap.add_argument("--pix-per-cm", type=float, help="pixels-per-cm for ALL files (overridden by metadata.csv rows)")
     ap.add_argument("--fps", type=float, help="frames-per-second for ALL files")
-    ap.add_argument("--gpu", default="0", help="CUDA device index (default 0)")
+    ap.add_argument("--gpu", help="index of the CUDA device to use, among those "
+                    "CUDA_VISIBLE_DEVICES allows (default: the first; GPU 0 if it is unset)")
     ap.add_argument("--output", choices=["both", "calls", "probs"], default="both",
                     help="what to write: both (default), calls-only (bouts.csv), or probs-only (frames.parquet)")
     ap.add_argument("--weights", metavar="TEMPLATE",
