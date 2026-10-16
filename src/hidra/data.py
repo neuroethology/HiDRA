@@ -702,7 +702,12 @@ class Dataset(BaseDataset):
                 mouse_pairs = []
                 for agent in agents:
                     if len(cross_pairs[agent]) == 0:
-                        target = rng.choice([i for i in mice if i != agent])
+                        others = [i for i in mice if i != agent]
+                        if not others:   # only this mouse is labelled: any other tracked one
+                            others = [i for i in video.tracking_data.mouse_index if i != agent]
+                        # With no other mouse at all (a single-animal recording), the agent is
+                        # paired with itself, which get_element reads as "partner unobserved".
+                        target = rng.choice(others) if others else agent
 
                         mouse_pair = (agent, target)
                         self_label = video.labels.label_to_idx[(agent, agent)]
@@ -908,6 +913,10 @@ class Dataset(BaseDataset):
             agent_target_sparse = agent_target_flat.T.reshape((self.input_seq_len,) + input_sparse.shape[1:])
             agent_target[:, :, video.tracking_data.bodypart_index] = agent_target_sparse
         agent_target = agent_target[:, :, : self.num_bodyparts]
+        if agent_id == target_id:
+            # A mouse with no partner (see epochs_supervised): all-nan is the model's
+            # missing-keypoint sentinel, so the partner reads as out of view.
+            agent_target[:, 1] = np.nan
         agent, target = agent_target[:, 0], agent_target[:, 1]
 
         self_labels = np.zeros([self.output_seq_len], dtype="int16")

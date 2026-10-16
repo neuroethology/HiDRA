@@ -31,10 +31,9 @@ annotate  →  prepare  →  train  →  predict --weights  →  calibrate  → 
   the `lab` column of the outputs. Pick the lab whose zero-shot calls were closest.
 - **One behaviour per (subject, target) per frame.** Labels are stored as one action id per pair
   per frame, so overlapping bouts of different behaviours on the same pair overwrite each other.
-- **Annotate at least two mice.** The trainer forms an (agent, target) pair for every annotated
-  agent, and for an agent with no cross-directed labels it picks a target at random from the
-  *other* mice present. A video that annotates only one mouse leaves nothing to pick from and the
-  run dies inside numpy (`a cannot be empty unless no samples are taken`).
+- **Annotating one mouse is fine.** The trainer forms an (agent, target) pair for every annotated
+  agent. For an agent with only self-directed labels it picks another tracked mouse at random,
+  or, in a single-animal recording, an unobserved partner.
 - **Un-annotated frames are negatives.** For each (agent, target, action) a video annotates, every
   frame outside a bout is a negative example for that combination. Annotate each behaviour
   exhaustively within a video, and leave out videos you only skimmed. Combinations a video does
@@ -60,7 +59,9 @@ inference, it is not something to try on a laptop.
 
 The default backend is PyTorch and needs no JAX. `train --backend jax` runs the original trainer
 instead (`uv sync --extra jax --extra torch`); both write the checkpoint in the same layout, and
-`predict.py --weights` loads it on either backend.
+`predict.py --weights` loads it on either backend. On a GPU under ~12 GB the JAX trainer runs out
+of memory at its first validation pass (it validates 512 windows at a time); set
+`HIDRA_EVAL_BATCH=64`.
 
 ## 1. Annotate
 
@@ -374,4 +375,5 @@ fast paths); [training.md](training.md) lists them and its header comments expla
 | `head` mode plateaus well below the zero-shot head it started from | you passed `--ddi-steps N`: the frozen tail now reads its inputs through statistics estimated on your few videos (§3b) — drop the flag |
 | trained fine, predictions look wrong for *other* behaviours | a `tail`-mode checkpoint only speaks for the adopted lab; restrict with `--labs`, or use `--mode head` |
 | stale results after re-annotating | the scratch cache is keyed by video id; `train` clears it by default — do not pass `--reuse-cache` after re-running `prepare` |
+| `RESOURCE_EXHAUSTED: Out of memory` at step 0 with `--backend jax` | validation batches of 512 do not fit a small GPU — `export HIDRA_EVAL_BATCH=64` |
 | `FileNotFoundError: …_unsupervised.pkl` with `--backend jax` | an older HiDRA that resolved the pickles by name; the JAX trainer now reads either container — upgrade |

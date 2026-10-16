@@ -38,6 +38,9 @@ export CUDA_VISIBLE_DEVICES=0                     # one GPU per process
   overwrite nothing (the loader prefers `.safetensors`, so a freshly written `.pkl` next to the
   published `.safetensors` is silently ignored) and confuse everything. Copy `thresholds.json` in
   (stage 2 needs it, §3) and nothing else.
+- **GPU memory.** Stage 1 allocates a single 12 GiB buffer, so it needs a GPU well over 12 GB.
+  Stage 2 validates 512 windows at a time, which does not fit 8 GB; `export HIDRA_EVAL_BATCH=64`
+  makes it fit, and changes only how validation is batched.
 - **`HIDRA_WORKDIR` caches derived data keyed by video id** — `tmp/train/videos.pkl` and the
   memory-mapped tracking/label arrays. It is not invalidated when the manifest changes: delete it
   after editing the dataset.

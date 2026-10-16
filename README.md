@@ -28,8 +28,11 @@ for notebook use: `import hidra`.
 
 ## Setup
 
-Python 3.12+ and an NVIDIA GPU (driver ≥ 525). HiDRA is a normal Python package; install it
-with [uv](https://docs.astral.sh/uv/):
+Python 3.12+ and an NVIDIA GPU (driver ≥ 525). 8 GB of GPU memory is enough for inference and
+fine-tuning on the default PyTorch backend. The JAX backend needs more: on 8 GB its inference runs
+out of memory, and its trainer needs `HIDRA_EVAL_BATCH=64`. Training from scratch
+([docs/training.md](docs/training.md)) needs well over 12 GB. HiDRA is a normal Python package;
+install it with [uv](https://docs.astral.sh/uv/):
 
 ```bash
 uv sync --extra torch          # in a checkout: creates .venv
@@ -235,7 +238,7 @@ to a pooled value then 0.30.
 --out DIR          output folder (default: doom_predictions)
 --pix-per-cm N     pixels-per-cm for all files (metadata.csv rows override)
 --fps N            frame rate for all files
---gpu N            CUDA device index (default 0)
+--gpu N            which visible CUDA device (default: the first CUDA_VISIBLE_DEVICES allows)
 --output MODE      both | calls | probs
 --weights TEMPLATE fine-tuned per-lab checkpoints, e.g. 'ft_models/{config}__mytag.pkl'
                    (or .safetensors -- either container, either backend)
@@ -289,10 +292,13 @@ including the smoke runs to do before committing a GPU.
 - `video_id`s are derived from filenames; keep filenames unique within a folder.
 - The tool sets `SNIFFALL=1` and `PREDICT_BATCH=64` (long-video memory) automatically, plus
   `XLA_FLAGS=--xla_gpu_autotune_level=0` (6-bodypart configs hang otherwise) and
-  `XLA_PYTHON_CLIENT_PREALLOCATE=false`, which only matter to `--backend jax`.
-- Annotations for fine-tuning should cover **at least two mice**. The trainer pairs each
-  annotated agent with a target, and a video annotating only one mouse leaves it with no
-  target to choose (it fails inside numpy with `a cannot be empty unless no samples are taken`).
+  `XLA_PYTHON_CLIENT_PREALLOCATE=false`, which only matter to `--backend jax`, and, unless
+  already set, `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True` (fewer out-of-memory errors on
+  small GPUs).
+- Single-animal recordings work: a mouse with no cage-mate is paired with an unobserved partner.
+  Its self-directed calls are somewhat weaker than with cage-mates in view (AdaptableSnail rear,
+  F1 0.72 vs 0.81 at the bundled threshold, 0.79 at the best one), so calibrate thresholds on a
+  few annotated solo recordings.
 - A fine-tuned checkpoint belongs to the lab you adopted: always predict with it under
   `--labs <that lab>`, and keep its calibrated thresholds CSV next to it.
 

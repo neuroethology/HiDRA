@@ -562,7 +562,10 @@ class Trainer:
         self.train_dataset = train_dataset
         self.train_batch_size = train_batch_size
         self.eval_dataset = eval_dataset
-        self.eval_batch_size = eval_batch_size or 4 * train_batch_size
+        # HIDRA_EVAL_BATCH lowers it on small GPUs: 4 x 128 runs an 8 GB card out of memory at
+        # the first evaluation. It only changes how validation is batched.
+        self.eval_batch_size = (eval_batch_size or int(os.environ.get("HIDRA_EVAL_BATCH") or 0)
+                                or 4 * train_batch_size)
         self.custom_eval_loop = custom_eval_loop
         self.eval_interval = eval_interval
         self.skip_eval = skip_eval

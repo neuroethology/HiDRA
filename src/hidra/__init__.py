@@ -59,7 +59,7 @@ def thresholds(path=THRESHOLDS):
 
 
 def predict(folder, out="doom_predictions", labs=None, actions=None, subject="*", target="*",
-            pix_per_cm=None, fps=None, jobs=None, gpu="0", output="both", weights=None,
+            pix_per_cm=None, fps=None, jobs=None, gpu=None, output="both", weights=None,
             thresholds=THRESHOLDS, threshold=None, keep_work=False, backend="torch",
             configs=None):
     """Run the ensemble over `folder` and return the bouts DataFrame (see run() for the

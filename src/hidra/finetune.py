@@ -690,13 +690,16 @@ def cmd_train(args):
                LABTAIL_OUTDIR=out,
                FT_STEPS=str(args.steps),
                FT_LR=str(args.lr),
-               CUDA_VISIBLE_DEVICES=str(args.gpu),
+               CUDA_VISIBLE_DEVICES=hidra_predict.visible_gpu(args.gpu),
                # Deterministic ops on the JAX path, as the LOLO bundle set them, so a
                # `--backend jax` fine-tune is reproducible. Ignored by the torch backend.
                XLA_FLAGS="--xla_gpu_autotune_level=0"
                + (" --xla_gpu_deterministic_ops=true"
                   if getattr(args, "backend", "torch") == "jax" else ""),
                XLA_PYTHON_CLIENT_PREALLOCATE="false")
+    # Without this, building the 23fps_7bp feature cache runs an 8 GB GPU out of memory
+    # through fragmentation. A value already set in the shell wins.
+    env.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
     if args.mode == "head":                           # train ONLY out-proj-perlab (frozen tail)
         env["LABTAIL_HEAD_ONLY"] = "1"
     elif args.mode == "embedding":                    # train the lab embedding + head
@@ -817,11 +820,12 @@ def cmd_train(args):
             done.append(cfg)
 
     print(f"\ntrained {len(done)}/{len(configs)} config(s){' -- failed: ' + str(failed) if failed else ''}")
+    if failed:
+        # Non-zero, so `train && predict` stops here: inference needs every config's checkpoint.
+        sys.exit(f"ERROR: {failed} failed; the trainer's own output above says why. Fix it and "
+                 f"rerun the same command -- configs already trained are skipped.")
     if args.smoke:
         print("(--smoke writes no checkpoints; it only proves the data + env are wired up)")
-        return
-    if not done:
-        print("nothing was written; fix the error above (the trainer's own output says why) and rerun.")
         return
     if len(done) < len(CONFIGS):
         print(f"NOTE: inference averages all 5 configs and loads each one's checkpoint, so predict.py "
@@ -1026,7 +1030,8 @@ def main():
     p.add_argument("--lr", type=float, default=0.004, help="peak Adam LR (default 0.004)")
     p.add_argument("--videos", help="comma-separated filenames/stems/video_ids to train on (default: all staged)")
     p.add_argument("--configs", help=f"comma-separated configs to train (default all 5: {','.join(CONFIGS)})")
-    p.add_argument("--gpu", default="0", help="CUDA device index (default 0)")
+    p.add_argument("--gpu", help="index of the CUDA device to use, among those "
+                   "CUDA_VISIBLE_DEVICES allows (default: the first; GPU 0 if it is unset)")
     p.add_argument("--seed", type=int, help="training seed (data order + augmentation)")
     p.add_argument("--eval-interval", type=int, help="steps between validation passes")
     p.add_argument("--patience", type=int, metavar="N",
